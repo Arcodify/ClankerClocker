@@ -25,6 +25,15 @@ pub struct PbRecord {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PbUserRecord {
+    pub id: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 pub struct PocketBase {
     pub base_url: String,
     pub token: String,
@@ -82,6 +91,19 @@ impl PocketBase {
         Ok(())
     }
 
+    async fn get_record<T: for<'de> Deserialize<'de>>(&self, collection: &str, id: &str) -> Result<T> {
+        let url = format!("{}/api/collections/{}/records/{}", self.base_url, collection, id);
+        let resp = self.client.get(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("PB get error: {}", text));
+        }
+        Ok(resp.json::<T>().await?)
+    }
+
     pub async fn create_session(
         &self,
         user_id: &str,
@@ -98,6 +120,10 @@ impl PocketBase {
             "user_email": user_email,
         })).await?;
         Ok(rec.id)
+    }
+
+    pub async fn get_user_record(&self, user_id: &str) -> Result<PbUserRecord> {
+        self.get_record("users", user_id).await
     }
 
     /// Close any active/on_break sessions for a user (called before creating a new session).
@@ -139,6 +165,18 @@ impl PocketBase {
             SessionStatus::Idle => "completed",
         };
         self.patch("work_sessions", session_id, json!({ "status": s })).await
+    }
+
+    pub async fn update_session_break_metrics(
+        &self,
+        session_id: &str,
+        break_count: u32,
+        total_break_seconds: i64,
+    ) -> Result<()> {
+        self.patch("work_sessions", session_id, json!({
+            "break_count": break_count,
+            "total_break_seconds": total_break_seconds,
+        })).await
     }
 
     pub async fn start_break(&self, session_id: &str, break_type: &str, start: &chrono::DateTime<chrono::Utc>) -> Result<String> {
@@ -269,6 +307,9 @@ impl PocketBase {
             type_key: item["type_key"].as_str().unwrap_or("other").to_string(),
             duration_minutes: item["duration_minutes"].as_u64().unwrap_or(0) as u32,
             sort_order: item["sort_order"].as_u64().unwrap_or(0) as u32,
+            auto_start_enabled: item["auto_start_enabled"].as_bool().unwrap_or(false),
+            auto_start_time: item["auto_start_time"].as_str().map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            auto_end_time: item["auto_end_time"].as_str().map(|s| s.to_string()).filter(|s| !s.is_empty()),
         }).collect();
         Ok(configs)
     }
@@ -291,8 +332,24 @@ impl PocketBase {
             };
 
             // Read name/email stored on session at clock-in (avoids cross-user PB access rules)
-            let user_name = item["user_name"].as_str().unwrap_or("").to_string();
-            let user_email = item["user_email"].as_str().unwrap_or(&user_id).to_string();
+            let mut user_name = item["user_name"].as_str().unwrap_or("").to_string();
+            let mut user_email = item["user_email"].as_str().unwrap_or("").to_string();
+
+            if let Ok(user) = self.get_user_record(&user_id).await {
+                if !user.email.is_empty() {
+                    user_email = user.email;
+                }
+                if !user.name.trim().is_empty() {
+                    user_name = user.name.trim().to_string();
+                }
+            }
+
+            if user_name.is_empty() && !user_email.is_empty() {
+                user_name = user_email.split('@').next().unwrap_or("").to_string();
+            }
+            if user_email.is_empty() {
+                user_email = user_id.clone();
+            }
 
             let clock_in_str = item["clock_in"].as_str().unwrap_or("");
             let clock_in = chrono::DateTime::parse_from_rfc3339(clock_in_str)
@@ -384,4 +441,3 @@ impl PocketBase {
         Ok(data["items"][0]["active_app"].as_str().unwrap_or("").to_string())
     }
 }
-

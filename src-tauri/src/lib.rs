@@ -17,8 +17,8 @@ use tauri::{
 };
 
 use db::LocalDb;
-use chrono::Utc;
-use session::{ActivityCounters, ActivitySnapshot, AppConfig, SessionState, SessionStatus};
+use chrono::{FixedOffset, NaiveTime, Timelike, Utc};
+use session::{ActivityCounters, ActivitySnapshot, AppConfig, BreakConfig, SessionState, SessionStatus};
 use pocketbase::PocketBase;
 
 pub struct AppState {
@@ -28,6 +28,8 @@ pub struct AppState {
     pub input_monitoring: Arc<AtomicBool>,
     pub db: Arc<Mutex<LocalDb>>,
     pub break_id: Arc<Mutex<Option<String>>>,
+    pub break_configs: Arc<Mutex<Vec<BreakConfig>>>,
+    pub auto_break_history: Arc<Mutex<HashSet<String>>>,
 }
 
 pub fn run() {
@@ -48,6 +50,8 @@ pub fn run() {
             let session: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
             let counters: Arc<Mutex<ActivityCounters>> = Arc::new(Mutex::new(ActivityCounters::default()));
             let break_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let break_configs: Arc<Mutex<Vec<BreakConfig>>> = Arc::new(Mutex::new(BreakConfig::defaults()));
+            let auto_break_history: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
             let input_monitoring = Arc::new(AtomicBool::new(false));
 
             // System tray
@@ -124,7 +128,9 @@ pub fn run() {
                 config: config.clone(),
                 input_monitoring: input_monitoring.clone(),
                 db: db.clone(),
-                break_id,
+                break_id: break_id.clone(),
+                break_configs: break_configs.clone(),
+                auto_break_history: auto_break_history.clone(),
             });
 
             // Start input monitor thread (rdev blocks its OS thread)
@@ -136,21 +142,65 @@ pub fn run() {
             let counters_bg = counters.clone();
             let config_bg = config.clone();
             let db_bg = db.clone();
+            let break_configs_bg = break_configs.clone();
+            let break_id_bg = break_id.clone();
+            let auto_break_history_bg = auto_break_history.clone();
 
             tauri::async_runtime::spawn(async move {
                 let mut net_seen: HashSet<String> = HashSet::new();
                 let mut dns_cache: HashMap<String, String> = HashMap::new();
                 let mut snapshot_tick: u32 = 0;
                 let mut network_tick: u32 = 0;
+                let mut break_config_refresh_tick: u32 = 60;
 
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     snapshot_tick += 5;
                     network_tick += 5;
+                    break_config_refresh_tick += 5;
+
+                    if break_config_refresh_tick >= 60 {
+                        break_config_refresh_tick = 0;
+                        let (pb_url, pb_token) = {
+                            let cfg = config_bg.lock();
+                            (cfg.pb_url.clone(), cfg.pb_token.clone())
+                        };
+
+                        if !pb_url.is_empty() && !pb_token.is_empty() {
+                            let pb = PocketBase::new(pb_url, pb_token);
+                            if let Ok(configs) = pb.get_break_configs().await {
+                                *break_configs_bg.lock() = configs;
+                            }
+                        } else {
+                            *break_configs_bg.lock() = BreakConfig::defaults();
+                        }
+                    }
 
                     let status = session_bg.lock().status.clone();
                     if status == SessionStatus::Idle {
+                        auto_break_history_bg.lock().clear();
                         continue;
+                    }
+
+                    if status == SessionStatus::Active {
+                        let configs = break_configs_bg.lock().clone();
+                        let history = auto_break_history_bg.lock().clone();
+                        if let Some(config) = find_due_auto_break(&configs, &history) {
+                            if commands::start_break_internal(
+                                &app_handle,
+                                &session_bg,
+                                &config_bg,
+                                &break_id_bg,
+                                &config.type_key,
+                            )
+                            .await
+                            .is_ok()
+                            {
+                                auto_break_history_bg
+                                    .lock()
+                                    .insert(auto_break_history_key(&config.id));
+                            }
+                        }
                     }
 
                     // Active window poll every 5s
@@ -308,4 +358,43 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
+}
+
+fn find_due_auto_break(
+    configs: &[BreakConfig],
+    history: &HashSet<String>,
+) -> Option<BreakConfig> {
+    let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60)?;
+    let now_nepal = Utc::now().with_timezone(&nepal_offset);
+    let now_time = NaiveTime::from_hms_opt(now_nepal.hour(), now_nepal.minute(), 0)?;
+
+    configs.iter().find_map(|config| {
+        if !config.auto_start_enabled {
+            return None;
+        }
+
+        let key = auto_break_history_key(&config.id);
+        if history.contains(&key) {
+            return None;
+        }
+
+        let start_time = parse_hhmm(config.auto_start_time.as_deref()?)?;
+        let end_time = parse_hhmm(config.auto_end_time.as_deref()?)?;
+        if now_time >= start_time && now_time <= end_time {
+            Some(config.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn auto_break_history_key(config_id: &str) -> String {
+    let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60)
+        .expect("valid Nepal offset");
+    let now_nepal = Utc::now().with_timezone(&nepal_offset);
+    format!("{}:{}", now_nepal.format("%Y-%m-%d"), config_id)
+}
+
+fn parse_hhmm(value: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(value, "%H:%M").ok()
 }

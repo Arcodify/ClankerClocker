@@ -89,14 +89,44 @@ pub struct BreakConfig {
     pub type_key: String,
     pub duration_minutes: u32,
     pub sort_order: u32,
+    pub auto_start_enabled: bool,
+    pub auto_start_time: Option<String>,
+    pub auto_end_time: Option<String>,
 }
 
 impl BreakConfig {
     pub fn defaults() -> Vec<Self> {
         vec![
-            BreakConfig { id: "1".into(), name: "Short Break".into(), type_key: "short".into(), duration_minutes: 15, sort_order: 0 },
-            BreakConfig { id: "2".into(), name: "Lunch".into(), type_key: "lunch".into(), duration_minutes: 30, sort_order: 1 },
-            BreakConfig { id: "3".into(), name: "Other".into(), type_key: "other".into(), duration_minutes: 0, sort_order: 2 },
+            BreakConfig {
+                id: "1".into(),
+                name: "Short Break".into(),
+                type_key: "short".into(),
+                duration_minutes: 15,
+                sort_order: 0,
+                auto_start_enabled: false,
+                auto_start_time: None,
+                auto_end_time: None,
+            },
+            BreakConfig {
+                id: "2".into(),
+                name: "Lunch".into(),
+                type_key: "lunch".into(),
+                duration_minutes: 30,
+                sort_order: 1,
+                auto_start_enabled: false,
+                auto_start_time: None,
+                auto_end_time: None,
+            },
+            BreakConfig {
+                id: "3".into(),
+                name: "Other".into(),
+                type_key: "other".into(),
+                duration_minutes: 0,
+                sort_order: 2,
+                auto_start_enabled: false,
+                auto_start_time: None,
+                auto_end_time: None,
+            },
         ]
     }
 }

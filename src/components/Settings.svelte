@@ -81,6 +81,7 @@
   clock_out  (date)
   status     (text)
   total_break_seconds (number)
+  break_count (number)
 
 breaks
   session_id (relation)
@@ -103,7 +104,17 @@ network_connections
   process_name (text)
   remote_host  (text)
   remote_ip    (text)
-  remote_port  (number)`}</pre>
+  remote_port  (number)
+
+break_configs
+  name               (text)
+  type_key           (text)
+  duration_minutes   (number)
+  sort_order         (number)
+  is_active          (bool)
+  auto_start_enabled (bool)
+  auto_start_time    (text, HH:MM in Nepal time)
+  auto_end_time      (text, HH:MM in Nepal time)`}</pre>
   </div>
 </div>
 

@@ -51,9 +51,9 @@
       breakConfigs = await invoke<BreakConfig[]>("get_break_configs");
     } catch (_) {
       breakConfigs = [
-        { id: "1", name: "Short Break", type_key: "short", duration_minutes: 15, sort_order: 0 },
-        { id: "2", name: "Lunch", type_key: "lunch", duration_minutes: 30, sort_order: 1 },
-        { id: "3", name: "Other", type_key: "other", duration_minutes: 0, sort_order: 2 },
+        { id: "1", name: "Short Break", type_key: "short", duration_minutes: 15, sort_order: 0, auto_start_enabled: false, auto_start_time: null, auto_end_time: null },
+        { id: "2", name: "Lunch", type_key: "lunch", duration_minutes: 30, sort_order: 1, auto_start_enabled: false, auto_start_time: null, auto_end_time: null },
+        { id: "3", name: "Other", type_key: "other", duration_minutes: 0, sort_order: 2, auto_start_enabled: false, auto_start_time: null, auto_end_time: null },
       ];
     }
   }
@@ -121,6 +121,14 @@
   function fmtNum(n: number): string {
     return n.toLocaleString();
   }
+
+  function formatBreakLabel(config: BreakConfig): string {
+    const duration = config.duration_minutes > 0 ? ` (${config.duration_minutes}m)` : "";
+    if (config.auto_start_enabled && config.auto_start_time && config.auto_end_time) {
+      return `${config.name}${duration} · Auto ${config.auto_start_time}-${config.auto_end_time} NPT`;
+    }
+    return `${config.name}${duration}`;
+  }
 </script>
 
 <div class="dashboard">
@@ -176,7 +184,7 @@
               <div class="break-menu">
                 {#each breakConfigs as bc}
                   <button on:click={() => startBreak(bc.type_key)}>
-                    {breakIcon(bc.type_key)} {bc.name}{bc.duration_minutes > 0 ? ` (${bc.duration_minutes}m)` : ""}
+                    {breakIcon(bc.type_key)} {formatBreakLabel(bc)}
                   </button>
                 {/each}
               </div>

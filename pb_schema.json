@@ -630,6 +630,43 @@
       },
       {
         "hidden": false,
+        "id": "bool1500000002",
+        "name": "auto_start_enabled",
+        "presentable": false,
+        "required": false,
+        "system": false,
+        "type": "bool"
+      },
+      {
+        "autogeneratePattern": "",
+        "hidden": false,
+        "id": "text1500000003",
+        "max": 5,
+        "min": 0,
+        "name": "auto_start_time",
+        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "autogeneratePattern": "",
+        "hidden": false,
+        "id": "text1500000004",
+        "max": 5,
+        "min": 0,
+        "name": "auto_end_time",
+        "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+        "presentable": false,
+        "primaryKey": false,
+        "required": false,
+        "system": false,
+        "type": "text"
+      },
+      {
+        "hidden": false,
         "id": "autodate2990389176",
         "name": "created",
         "onCreate": true,

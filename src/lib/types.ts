@@ -59,6 +59,9 @@ export interface BreakConfig {
   type_key: string;
   duration_minutes: number;
   sort_order: number;
+  auto_start_enabled: boolean;
+  auto_start_time: string | null;
+  auto_end_time: string | null;
 }
 
 export interface LiveCounters {

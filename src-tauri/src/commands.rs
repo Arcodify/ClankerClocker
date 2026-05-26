@@ -7,6 +7,61 @@ use crate::config::DEFAULT_PB_URL;
 use crate::session::{ActivitySnapshot, BreakConfig, NetworkConnection, SessionStatus, SessionState, TodayStats, TeamMember};
 use crate::pocketbase::PocketBase;
 
+pub async fn start_break_internal(
+    app: &tauri::AppHandle,
+    session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
+    config: &std::sync::Arc<parking_lot::Mutex<crate::session::AppConfig>>,
+    break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    break_type: &str,
+) -> Result<(), String> {
+    let (pb_url, pb_token, session_id) = {
+        let cfg = config.lock();
+        let sess = session.lock();
+        if sess.status != SessionStatus::Active {
+            return Err("Not clocked in".into());
+        }
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            sess.session_id.clone().ok_or("No active session")?,
+        )
+    };
+
+    let now = Utc::now();
+
+    let break_id = if session_id.starts_with("local-") || pb_url.is_empty() || pb_token.is_empty() {
+        format!("local-break-{}", Uuid::new_v4())
+    } else {
+        let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
+        pb.start_break(&session_id, break_type, &now)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
+    let (break_count, total_break_seconds) = {
+        let mut sess = session.lock();
+        sess.status = SessionStatus::OnBreak;
+        sess.break_start = Some(now);
+        sess.break_count += 1;
+        let s = sess.clone();
+        let break_count = s.break_count;
+        let total_break_seconds = s.total_break_seconds;
+        drop(sess);
+        *break_id_state.lock() = Some(break_id);
+        app.emit("session-update", s).ok();
+        (break_count, total_break_seconds)
+    };
+
+    if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+        let pb = PocketBase::new(pb_url, pb_token);
+        pb.update_session_status(&session_id, &SessionStatus::OnBreak).await.ok();
+        pb.update_session_break_metrics(&session_id, break_count, total_break_seconds).await.ok();
+    }
+
+    update_tray(app, "break");
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn authenticate_pb(
     state: State<'_, AppState>,
@@ -76,6 +131,16 @@ pub async fn clock_in(
         let cfg = state.config.lock();
         (cfg.pb_url.clone(), cfg.user_name.clone(), cfg.user_email.clone())
     };
+    let display_name = if user_name.trim().is_empty() {
+        user_email
+            .split('@')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    } else {
+        user_name.trim().to_string()
+    };
     let now = Utc::now();
 
     // If offline (no token/url), generate a local session ID
@@ -85,7 +150,7 @@ pub async fn clock_in(
         let pb = PocketBase::new(pb_url, pb_token);
         // Close any stale active sessions for this user first (multi-machine protection)
         pb.close_stale_sessions(&user_id, &now).await.ok();
-        pb.create_session(&user_id, &now, &user_name, &user_email).await.map_err(|e| e.to_string())?
+        pb.create_session(&user_id, &now, &display_name, &user_email).await.map_err(|e| e.to_string())?
     };
 
     {
@@ -95,8 +160,10 @@ pub async fn clock_in(
         sess.clock_in = Some(now);
         sess.break_start = None;
         sess.total_break_seconds = 0;
+        sess.break_count = 0;
         let s = sess.clone();
         drop(sess);
+        state.auto_break_history.lock().clear();
         app.emit("session-update", s).ok();
     }
 
@@ -156,43 +223,7 @@ pub async fn start_break(
     state: State<'_, AppState>,
     break_type: String,
 ) -> Result<(), String> {
-    let (pb_url, pb_token, session_id) = {
-        let cfg = state.config.lock();
-        let sess = state.session.lock();
-        if sess.status != SessionStatus::Active {
-            return Err("Not clocked in".into());
-        }
-        (
-            cfg.pb_url.clone(),
-            cfg.pb_token.clone(),
-            sess.session_id.clone().ok_or("No active session")?,
-        )
-    };
-
-    let now = Utc::now();
-
-    let break_id = if session_id.starts_with("local-") || pb_url.is_empty() || pb_token.is_empty() {
-        format!("local-break-{}", Uuid::new_v4())
-    } else {
-        let pb = PocketBase::new(pb_url, pb_token);
-        pb.start_break(&session_id, &break_type, &now)
-            .await
-            .map_err(|e| e.to_string())?
-    };
-
-    {
-        let mut sess = state.session.lock();
-        sess.status = SessionStatus::OnBreak;
-        sess.break_start = Some(now);
-        sess.break_count += 1;
-        let s = sess.clone();
-        drop(sess);
-        *state.break_id.lock() = Some(break_id);
-        app.emit("session-update", s).ok();
-    }
-
-    update_tray(&app, "break");
-    Ok(())
+    start_break_internal(&app, &state.session, &state.config, &state.break_id, &break_type).await
 }
 
 #[tauri::command]
@@ -201,33 +232,44 @@ pub async fn end_break(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let break_id = state.break_id.lock().clone().ok_or("No active break")?;
-    let (pb_url, pb_token, break_start) = {
+    let (pb_url, pb_token, break_start, session_id) = {
         let cfg = state.config.lock();
         let sess = state.session.lock();
         (
             cfg.pb_url.clone(),
             cfg.pb_token.clone(),
             sess.break_start.ok_or("No break start time")?,
+            sess.session_id.clone().ok_or("No active session")?,
         )
     };
 
     let now = Utc::now();
     let break_duration = (now - break_start).num_seconds();
+    let can_sync = !break_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty();
 
-    if !break_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
-        let pb = PocketBase::new(pb_url, pb_token);
+    if can_sync {
+        let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
         pb.end_break(&break_id, &now).await.map_err(|e| e.to_string())?;
     }
 
-    {
+    let (break_count, total_break_seconds) = {
         let mut sess = state.session.lock();
         sess.status = SessionStatus::Active;
         sess.break_start = None;
         sess.total_break_seconds += break_duration;
         let s = sess.clone();
+        let break_count = s.break_count;
+        let total_break_seconds = s.total_break_seconds;
         drop(sess);
         *state.break_id.lock() = None;
         app.emit("session-update", s).ok();
+        (break_count, total_break_seconds)
+    };
+
+    if can_sync && !session_id.starts_with("local-") {
+        let pb = PocketBase::new(pb_url, pb_token);
+        pb.update_session_status(&session_id, &SessionStatus::Active).await.ok();
+        pb.update_session_break_metrics(&session_id, break_count, total_break_seconds).await.ok();
     }
 
     update_tray(&app, "active");
@@ -382,10 +424,14 @@ pub async fn get_break_configs(state: State<'_, AppState>) -> Result<Vec<BreakCo
         (cfg.pb_url.clone(), cfg.pb_token.clone())
     };
     if pb_url.is_empty() || pb_token.is_empty() {
-        return Ok(BreakConfig::defaults());
+        let defaults = BreakConfig::defaults();
+        *state.break_configs.lock() = defaults.clone();
+        return Ok(defaults);
     }
     let pb = PocketBase::new(pb_url, pb_token);
-    Ok(pb.get_break_configs().await.unwrap_or_else(|_| BreakConfig::defaults()))
+    let configs = pb.get_break_configs().await.unwrap_or_else(|_| BreakConfig::defaults());
+    *state.break_configs.lock() = configs.clone();
+    Ok(configs)
 }
 
 #[tauri::command]
