@@ -23,15 +23,26 @@
         pb_email: string;
         pb_token: string;
         user_id: string;
+        user_name: string;
+        user_email: string;
+        token_saved_at: string;
         default_pb_url: string;
       }>("get_settings");
 
+      // Always restore URL and email so Login form is pre-filled
       settings.update((s) => ({ ...s, pb_url: saved.pb_url, pb_email: saved.pb_email }));
 
-      if (saved.pb_token) {
-        authToken.set(saved.pb_token);
-        userId.set(saved.user_id);
-        view.set("dashboard");
+      if (saved.pb_token && saved.token_saved_at) {
+        const ageMs = Date.now() - new Date(saved.token_saved_at).getTime();
+        if (ageMs > 86_400_000) {
+          // Token older than 24 h — clear it and stay on login (email still pre-filled)
+          await invoke("clear_auth").catch(() => {});
+        } else {
+          authToken.set(saved.pb_token);
+          userId.set(saved.user_id);
+          userName.set(saved.user_name || saved.user_email);
+          view.set("dashboard");
+        }
       }
     } catch (_) {}
 

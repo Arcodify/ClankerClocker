@@ -17,6 +17,7 @@ use tauri::{
 };
 
 use db::LocalDb;
+use chrono::Utc;
 use session::{ActivityCounters, ActivitySnapshot, AppConfig, SessionState, SessionStatus};
 use pocketbase::PocketBase;
 
@@ -68,7 +69,26 @@ pub fn run() {
                             win.set_focus().ok();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        let app_clone = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(state) = app_clone.try_state::<AppState>() {
+                                let (pb_url, pb_token, session_id, total_break_secs) = {
+                                    let cfg = state.config.lock();
+                                    let sess = state.session.lock();
+                                    (cfg.pb_url.clone(), cfg.pb_token.clone(), sess.session_id.clone(), sess.total_break_seconds)
+                                };
+                                if let Some(sid) = session_id {
+                                    if !sid.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+                                        let pb = PocketBase::new(pb_url, pb_token);
+                                        let _ = pb.close_session(&sid, &Utc::now(), total_break_secs).await;
+                                    }
+                                    *state.session.lock() = SessionState::default();
+                                }
+                            }
+                            app_clone.exit(0);
+                        });
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -284,6 +304,7 @@ pub fn run() {
             commands::get_user_activity,
             commands::get_user_network,
             commands::get_user_monthly_sessions,
+            commands::clear_auth,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");

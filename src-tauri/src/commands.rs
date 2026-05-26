@@ -23,6 +23,9 @@ pub async fn authenticate_pb(
     cfg.pb_email = pb_email;
     cfg.pb_token = auth.token.clone();
     cfg.user_id = auth.record.id.clone();
+    cfg.user_name = auth.record.name.clone();
+    cfg.user_email = auth.record.email.clone();
+    cfg.token_saved_at = Utc::now().to_rfc3339();
     drop(cfg);
 
     // Persist to local db
@@ -38,6 +41,7 @@ pub async fn authenticate_pb(
         "user_name": auth.record.name,
         "user_email": auth.record.email,
         "is_admin": auth.record.is_admin,
+        "token_saved_at": state.config.lock().token_saved_at,
     }))
 }
 
@@ -49,6 +53,9 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Valu
         "pb_email": cfg.pb_email,
         "pb_token": cfg.pb_token,
         "user_id": cfg.user_id,
+        "user_name": cfg.user_name,
+        "user_email": cfg.user_email,
+        "token_saved_at": cfg.token_saved_at,
         "default_pb_url": DEFAULT_PB_URL,
     }))
 }
@@ -65,7 +72,10 @@ pub async fn clock_in(
     user_id: String,
     pb_token: String,
 ) -> Result<(), String> {
-    let pb_url = state.config.lock().pb_url.clone();
+    let (pb_url, user_name, user_email) = {
+        let cfg = state.config.lock();
+        (cfg.pb_url.clone(), cfg.user_name.clone(), cfg.user_email.clone())
+    };
     let now = Utc::now();
 
     // If offline (no token/url), generate a local session ID
@@ -73,7 +83,9 @@ pub async fn clock_in(
         format!("local-{}", uuid::Uuid::new_v4())
     } else {
         let pb = PocketBase::new(pb_url, pb_token);
-        pb.create_session(&user_id, &now).await.map_err(|e| e.to_string())?
+        // Close any stale active sessions for this user first (multi-machine protection)
+        pb.close_stale_sessions(&user_id, &now).await.ok();
+        pb.create_session(&user_id, &now, &user_name, &user_email).await.map_err(|e| e.to_string())?
     };
 
     {
@@ -374,6 +386,17 @@ pub async fn get_break_configs(state: State<'_, AppState>) -> Result<Vec<BreakCo
     }
     let pb = PocketBase::new(pb_url, pb_token);
     Ok(pb.get_break_configs().await.unwrap_or_else(|_| BreakConfig::defaults()))
+}
+
+#[tauri::command]
+pub async fn clear_auth(state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let mut cfg = state.config.lock();
+        cfg.pb_token = String::new();
+        cfg.token_saved_at = String::new();
+    }
+    let cfg = state.config.lock().clone();
+    state.db.lock().save_config(&cfg).map_err(|e| e.to_string())
 }
 
 fn update_tray(app: &tauri::AppHandle, status: &str) {

@@ -46,6 +46,9 @@ impl LocalDb {
             ("pb_email", &cfg.pb_email),
             ("pb_token", &cfg.pb_token),
             ("user_id", &cfg.user_id),
+            ("user_name", &cfg.user_name),
+            ("user_email", &cfg.user_email),
+            ("token_saved_at", &cfg.token_saved_at),
         ];
         for (k, v) in &pairs {
             self.conn.execute(
@@ -69,6 +72,9 @@ impl LocalDb {
                 "pb_email" => cfg.pb_email = row.1,
                 "pb_token" => cfg.pb_token = row.1,
                 "user_id" => cfg.user_id = row.1,
+                "user_name" => cfg.user_name = row.1,
+                "user_email" => cfg.user_email = row.1,
+                "token_saved_at" => cfg.token_saved_at = row.1,
                 _ => {}
             }
         }

@@ -112,6 +112,9 @@ fn macos_active_window() -> (String, String) {
 #[cfg(target_os = "windows")]
 fn windows_active_window() -> (String, String) {
     use std::process::Command;
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     // PowerShell: get foreground window via P/Invoke, return "AppName|WindowTitle"
     let script = r#"
@@ -133,7 +136,8 @@ $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
 "#;
 
     let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())

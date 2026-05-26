@@ -82,14 +82,41 @@ impl PocketBase {
         Ok(())
     }
 
-    pub async fn create_session(&self, user_id: &str, clock_in: &chrono::DateTime<chrono::Utc>) -> Result<String> {
+    pub async fn create_session(
+        &self,
+        user_id: &str,
+        clock_in: &chrono::DateTime<chrono::Utc>,
+        user_name: &str,
+        user_email: &str,
+    ) -> Result<String> {
         let rec = self.post("work_sessions", json!({
             "user_id": user_id,
             "clock_in": clock_in.to_rfc3339(),
             "status": "active",
-            "total_break_seconds": 0
+            "total_break_seconds": 0,
+            "user_name": user_name,
+            "user_email": user_email,
         })).await?;
         Ok(rec.id)
+    }
+
+    /// Close any active/on_break sessions for a user (called before creating a new session).
+    pub async fn close_stale_sessions(
+        &self,
+        user_id: &str,
+        now: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let filter = format!("user_id='{user_id}'&&(status='active'||status='on_break')");
+        let data = self.get_list("work_sessions", &filter, "").await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        for item in &items {
+            let id = item["id"].as_str().unwrap_or("");
+            if !id.is_empty() {
+                let break_secs = item["total_break_seconds"].as_i64().unwrap_or(0);
+                self.close_session(id, now, break_secs).await.ok();
+            }
+        }
+        Ok(())
     }
 
     pub async fn close_session(
@@ -246,19 +273,6 @@ impl PocketBase {
         Ok(configs)
     }
 
-    async fn get_user(&self, user_id: &str) -> (String, String) {
-        let url = format!("{}/api/collections/users/records/{}", self.base_url, user_id);
-        let Ok(resp) = self.client.get(&url).bearer_auth(&self.token).send().await else {
-            return (String::new(), String::new());
-        };
-        let Ok(data) = resp.json::<Value>().await else {
-            return (String::new(), String::new());
-        };
-        let name = data["name"].as_str().unwrap_or("").to_string();
-        let email = data["email"].as_str().unwrap_or("").to_string();
-        (name, email)
-    }
-
     /// Get all currently clocked-in team members (admin view).
     pub async fn get_team_status(&self) -> Result<Vec<TeamMember>> {
         let filter = "status='active'||status='on_break'";
@@ -276,7 +290,9 @@ impl PocketBase {
                 _ => SessionStatus::Idle,
             };
 
-            let (user_name, user_email) = self.get_user(&user_id).await;
+            // Read name/email stored on session at clock-in (avoids cross-user PB access rules)
+            let user_name = item["user_name"].as_str().unwrap_or("").to_string();
+            let user_email = item["user_email"].as_str().unwrap_or(&user_id).to_string();
 
             let clock_in_str = item["clock_in"].as_str().unwrap_or("");
             let clock_in = chrono::DateTime::parse_from_rfc3339(clock_in_str)

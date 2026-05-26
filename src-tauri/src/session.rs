@@ -128,6 +128,9 @@ pub struct AppConfig {
     pub pb_email: String,
     pub pb_token: String,
     pub user_id: String,
+    pub user_name: String,
+    pub user_email: String,
+    pub token_saved_at: String, // RFC3339; empty means no saved token
 }
 
 impl Default for AppConfig {
@@ -137,6 +140,9 @@ impl Default for AppConfig {
             pb_email: String::new(),
             pb_token: String::new(),
             user_id: String::new(),
+            user_name: String::new(),
+            user_email: String::new(),
+            token_saved_at: String::new(),
         }
     }
 }
