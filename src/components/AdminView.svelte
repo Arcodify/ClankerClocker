@@ -15,7 +15,7 @@
   let detailLoading = false;
   let netFilter = "";
   let netPage = 0;
-  const NET_PAGE_SIZE = 50;
+  const NET_PAGE_SIZE = 10;
   let activeTab: "activity" | "network" | "calendar" = "activity";
 
   // Calendar state
@@ -560,8 +560,6 @@
   .nproc { color: #7878a0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nhost { color: #a0a0bc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nport { color: #3a3a52; font-variant-numeric: tabular-nums; }
-  .nmore { text-align: center; font-size: 11px; color: #3a3a52; padding: 8px 0; }
-
   /* ── Calendar ── */
   .cal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .cal-month { font-size: 13px; font-weight: 700; color: #c0c0d0; }

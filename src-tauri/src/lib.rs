@@ -8,7 +8,7 @@ mod session;
 use parking_lot::Mutex;
 use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -145,6 +145,7 @@ pub fn run() {
             let break_configs_bg = break_configs.clone();
             let break_id_bg = break_id.clone();
             let auto_break_history_bg = auto_break_history.clone();
+            let input_monitoring_bg = input_monitoring.clone();
 
             tauri::async_runtime::spawn(async move {
                 let mut net_seen: HashSet<String> = HashSet::new();
@@ -219,6 +220,7 @@ pub fn run() {
                             "idle_seconds": c.idle_seconds(),
                             "active_app": &active_app,
                             "active_window": &active_window,
+                            "input_monitoring_active": input_monitoring_bg.load(Ordering::Relaxed),
                         });
                         drop(c);
                         app_handle.emit("live-counters", live).ok();

@@ -1,6 +1,7 @@
 {
   "name": "clankerclocker",
   "version": "0.1.0",
+  "author": "scelester",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -81,9 +81,7 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
     }
 
     eprintln!("[input-monitor] monitoring {} devices", spawned);
-    if spawned == 0 {
-        active_flag.store(false, Ordering::Relaxed);
-    }
+    active_flag.store(spawned > 0, Ordering::Relaxed);
 }
 
 // ── macOS / Windows: rdev (uses platform APIs) ───────────────────────────────
@@ -95,28 +93,38 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
     std::thread::Builder::new()
         .name("input-monitor".into())
         .spawn(move || {
-            let flag = active_flag.clone();
-            if let Err(e) = listen(move |event: Event| {
-                flag.store(true, Ordering::Relaxed);
-                let mut c = counters.lock();
-                c.last_activity = Some(std::time::Instant::now());
-                match event.event_type {
-                    EventType::KeyPress(_) => c.keystrokes += 1,
-                    EventType::ButtonPress(_) => c.mouse_clicks += 1,
-                    EventType::MouseMove { x, y } => {
-                        let dx = x - c.last_mouse_x;
-                        let dy = y - c.last_mouse_y;
-                        c.mouse_distance_px += (dx * dx + dy * dy).sqrt();
-                        c.last_mouse_x = x;
-                        c.last_mouse_y = y;
+            loop {
+                active_flag.store(true, Ordering::Relaxed);
+                let flag = active_flag.clone();
+                let counters_ref = counters.clone();
+
+                if let Err(e) = listen(move |event: Event| {
+                    let mut c = counters_ref.lock();
+                    c.last_activity = Some(std::time::Instant::now());
+                    match event.event_type {
+                        EventType::KeyPress(_) => c.keystrokes += 1,
+                        EventType::ButtonPress(_) => c.mouse_clicks += 1,
+                        EventType::MouseMove { x, y } => {
+                            let dx = x - c.last_mouse_x;
+                            let dy = y - c.last_mouse_y;
+                            c.mouse_distance_px += (dx * dx + dy * dy).sqrt();
+                            c.last_mouse_x = x;
+                            c.last_mouse_y = y;
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                }) {
+                    active_flag.store(false, Ordering::Relaxed);
+                    log::warn!("Input monitor failed: {:?}", e);
+                    #[cfg(target_os = "macos")]
+                    log::warn!("Grant Accessibility in System Settings -> Privacy & Security -> Accessibility.");
+                    #[cfg(target_os = "windows")]
+                    log::warn!("Run as administrator and check whether antivirus is blocking the tray icon or input hooks.");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
                 }
-            }) {
-                active_flag.store(false, Ordering::Relaxed);
-                log::warn!("Input monitor failed: {:?}", e);
-                log::warn!("On macOS: grant Accessibility in System Settings → Privacy → Accessibility.");
-                log::warn!("On Windows: run as administrator if hooks are blocked.");
+
+                break;
             }
         })
         .ok();

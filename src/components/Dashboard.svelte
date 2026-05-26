@@ -26,7 +26,17 @@
     : null;
 
   $: monitoringWarning = $session.status !== "idle" && liveCounters !== null
-    && liveCounters.keystrokes === 0 && liveCounters.mouse_clicks === 0 && liveCounters.idle_seconds > 60;
+    && !liveCounters.input_monitoring_active;
+  $: platformName = navigator.userAgent.includes("Windows")
+    ? "windows"
+    : navigator.userAgent.includes("Mac")
+      ? "macos"
+      : "linux";
+  $: monitoringWarningText = platformName === "windows"
+    ? "Input monitoring looks inactive. Run the app as administrator and check whether antivirus is blocking the tray icon or input hooks."
+    : platformName === "macos"
+      ? "Input monitoring looks inactive. Grant Accessibility in System Settings -> Privacy & Security -> Accessibility."
+      : "Input monitoring looks inactive. Run: sudo usermod -aG input $USER, then log out/in.";
 
   onMount(async () => {
     await refreshTodayStats();
@@ -72,7 +82,15 @@
         userId: $userId || "offline",
         pbToken: $authToken || "",
       });
-      liveCounters = { keystrokes: 0, mouse_clicks: 0, mouse_distance_px: 0, idle_seconds: 0, active_app: "", active_window: "" };
+      liveCounters = {
+        keystrokes: 0,
+        mouse_clicks: 0,
+        mouse_distance_px: 0,
+        idle_seconds: 0,
+        active_app: "",
+        active_window: "",
+        input_monitoring_active: true,
+      };
       setTimeout(refreshTodayStats, 500);
     } catch (e) {
       errorMessage.set(String(e));
@@ -164,7 +182,7 @@
     <!-- Monitoring warning -->
     {#if monitoringWarning}
       <div class="warn-banner">
-        ⚠ Input monitoring inactive — run: <code>sudo usermod -aG input $USER</code> then log out/in
+        ⚠ {monitoringWarningText}
       </div>
     {/if}
 
@@ -387,14 +405,6 @@
     color: #c06a00;
     line-height: 1.5;
   }
-  .warn-banner code {
-    background: #0e0c06;
-    padding: 1px 4px;
-    border-radius: 3px;
-    font-size: 10px;
-    color: #e08030;
-  }
-
   .actions {
     display: flex;
     justify-content: center;

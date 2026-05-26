@@ -111,42 +111,58 @@ fn macos_active_window() -> (String, String) {
 
 #[cfg(target_os = "windows")]
 fn windows_active_window() -> (String, String) {
-    use std::process::Command;
-    use std::os::windows::process::CommandExt;
+    use std::path::Path;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    };
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return (String::new(), String::new());
+        }
 
-    // PowerShell: get foreground window via P/Invoke, return "AppName|WindowTitle"
-    let script = r#"
-Add-Type @"
-using System; using System.Runtime.InteropServices; using System.Text;
-public class WinFocus {
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-}
-"@
-$hwnd = [WinFocus]::GetForegroundWindow()
-$sb = New-Object System.Text.StringBuilder 256
-[WinFocus]::GetWindowText($hwnd, $sb, 256) | Out-Null
-$pid = 0
-[WinFocus]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
-$proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-"$($proc.Name)|$($sb.ToString())"
-"#;
+        let title_len = GetWindowTextLengthW(hwnd);
+        let mut title_buf = vec![0u16; title_len.saturating_add(1) as usize];
+        if !title_buf.is_empty() {
+            GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
+        }
+        let title = String::from_utf16_lossy(&title_buf)
+            .trim_matches(char::from(0))
+            .trim()
+            .to_string();
 
-    let out = Command::new("powershell")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return (String::new(), title);
+        }
 
-    let out = out.trim();
-    if let Some((app, win)) = out.split_once('|') {
-        (app.trim().to_string(), win.trim().to_string())
-    } else {
-        (String::new(), out.to_string())
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return (String::new(), title);
+        }
+
+        let mut name_buf = vec![0u16; 260];
+        let mut len = name_buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, name_buf.as_mut_ptr(), &mut len);
+        CloseHandle(process);
+
+        let app = if ok != 0 && len > 0 {
+            let raw = String::from_utf16_lossy(&name_buf[..len as usize]);
+            Path::new(&raw)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(raw.as_str())
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        (app, title)
     }
 }

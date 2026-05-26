@@ -71,4 +71,5 @@ export interface LiveCounters {
   idle_seconds: number;
   active_app: string;
   active_window: string;
+  input_monitoring_active: boolean;
 }

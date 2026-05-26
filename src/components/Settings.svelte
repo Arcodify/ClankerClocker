@@ -74,47 +74,12 @@
   </div>
 
   <div class="info">
-    <div class="info-title">Required PocketBase Collections</div>
-    <pre class="schema">{`work_sessions
-  user_id    (text)
-  clock_in   (date)
-  clock_out  (date)
-  status     (text)
-  total_break_seconds (number)
-  break_count (number)
-
-breaks
-  session_id (relation)
-  start_time (date)
-  end_time   (date)
-  type       (text)
-
-activity_snapshots
-  session_id (relation)
-  timestamp  (date)
-  keystrokes (number)
-  mouse_clicks (number)
-  active_app (text)
-  active_window (text)
-  idle_seconds (number)
-
-network_connections
-  session_id   (relation)
-  timestamp    (date)
-  process_name (text)
-  remote_host  (text)
-  remote_ip    (text)
-  remote_port  (number)
-
-break_configs
-  name               (text)
-  type_key           (text)
-  duration_minutes   (number)
-  sort_order         (number)
-  is_active          (bool)
-  auto_start_enabled (bool)
-  auto_start_time    (text, HH:MM in Nepal time)
-  auto_end_time      (text, HH:MM in Nepal time)`}</pre>
+    <div class="info-title">Platform Notes For End Users</div>
+    <div class="notes">
+      <p><strong>macOS:</strong> needs Accessibility permission granted in System Settings → Privacy &amp; Security → Accessibility</p>
+      <p><strong>Windows:</strong> run as administrator if the tray icon or input hooks get blocked by antivirus</p>
+      <p><strong>Linux:</strong> user must be in the input group (<code>sudo usermod -aG input $USER</code>, then log out/in)</p>
+    </div>
   </div>
 </div>
 
@@ -183,17 +148,18 @@ break_configs
 
   .info { padding: 0 18px 20px; }
   .info-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: #5a5a72; margin-bottom: 8px; }
-  .schema {
+  .notes {
     background: #0a0a10;
     border: 1px solid #1e1e28;
     border-radius: 8px;
     padding: 12px;
-    font-size: 10px;
-    color: #6060808;
     color: #505068;
-    line-height: 1.6;
-    overflow-x: auto;
-    white-space: pre;
-    font-family: "JetBrains Mono", "Fira Code", monospace;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    line-height: 1.5;
+    font-size: 12px;
   }
+  .notes strong { color: #c0c0cc; }
+  .notes code { font-size: 11px; color: #d0d0e8; }
 </style>

@@ -9,6 +9,7 @@
   let pbEmail = $settings.pb_email || "";
   let pbPassword = "";
   let loading = false;
+  let showAdvanced = !pbUrl;
 
   onMount(async () => {
     // Load default URL from Rust config constant if nothing saved yet
@@ -18,10 +19,12 @@
         if (s.default_pb_url) pbUrl = s.default_pb_url;
       } catch (_) {}
     }
+    showAdvanced = !pbUrl;
   });
 
   async function connect() {
     if (!pbUrl || !pbEmail || !pbPassword) {
+      if (!pbUrl) showAdvanced = true;
       errorMessage.set("All fields are required");
       return;
     }
@@ -53,19 +56,10 @@
   <div class="logo">
     <div class="logo-icon">⏱</div>
     <div class="logo-name">ClankerClocker</div>
-    <div class="logo-sub">Time & Activity Tracker</div>
+    <div class="logo-sub">by @arcodify</div>
   </div>
 
   <div class="form">
-    <label>
-      <span>Server</span>
-      <input
-        bind:value={pbUrl}
-        placeholder="https://pb.yourcompany.com"
-        type="url"
-        autocomplete="off"
-      />
-    </label>
     <label>
       <span>Email</span>
       <input bind:value={pbEmail} placeholder="you@company.com" type="email" autocomplete="off" />
@@ -80,6 +74,22 @@
         on:keydown={(e) => e.key === "Enter" && connect()}
       />
     </label>
+
+    <button class="advanced-toggle" type="button" on:click={() => (showAdvanced = !showAdvanced)}>
+      {showAdvanced ? "Hide advanced" : "Advanced"}
+    </button>
+
+    {#if showAdvanced}
+      <label>
+        <span>Server</span>
+        <input
+          bind:value={pbUrl}
+          placeholder="https://pb.yourcompany.com"
+          type="url"
+          autocomplete="off"
+        />
+      </label>
+    {/if}
 
     <button class="btn-connect" on:click={connect} disabled={loading}>
       {loading ? "Connecting…" : "Sign In"}
@@ -142,6 +152,17 @@
   }
   .btn-connect:hover:not(:disabled) { background: #4f46e5; }
   .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .advanced-toggle {
+    align-self: flex-start;
+    background: transparent;
+    border: none;
+    color: #6b7280;
+    font-size: 12px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .advanced-toggle:hover { color: #a0a0bc; }
 
   .divider {
     text-align: center;
