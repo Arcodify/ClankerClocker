@@ -250,8 +250,11 @@ fn macos_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String,
 
 #[cfg(target_os = "windows")]
 fn windows_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String, String>) -> Vec<NetworkConnection> {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let out = Command::new("netstat").args(["-ano"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
     let now = Utc::now();
     let mut raw: Vec<(String, u16, u16, String)> = Vec::new();
@@ -279,9 +282,12 @@ fn windows_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<Strin
 
 #[cfg(target_os = "windows")]
 fn get_process_name_windows(pid: u32) -> String {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     Command::new("tasklist")
         .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output().ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| s.lines().next().and_then(|l| l.split(',').next()).map(|s| s.trim_matches('"').to_string()))

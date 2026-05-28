@@ -552,7 +552,7 @@
   /* ── Network ── */
   .nfilter { margin-left: auto; background: #0e0e16; border: 1px solid #1e1e2a; border-radius: 5px; padding: 3px 8px; font-size: 10px; color: #8080a0; outline: none; width: 160px; }
   .nfilter:focus { border-color: #3b82f6; }
-  .net-table { font-size: 11px; max-height: 300px; overflow-y: auto; }
+  .net-table { font-size: 11px; }
   .net-table::-webkit-scrollbar { width: 2px; }
   .net-table::-webkit-scrollbar-thumb { background: #2a2a36; }
   .net-head { display: grid; grid-template-columns: 46px 80px 1fr 44px; color: #3a3a52; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 0 0 5px; border-bottom: 1px solid #1a1a24; gap: 6px; position: sticky; top: 0; background: #111118; }
