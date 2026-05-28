@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher, onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { check as checkUpdate } from "@tauri-apps/plugin-updater";
   import { listen } from "@tauri-apps/api/event";
   import {
     session, latestActivity, networkFeed,
@@ -17,6 +18,10 @@
   let breakConfigs: BreakConfig[] = [];
   let liveCounters: LiveCounters | null = null;
   let unlisten: (() => void) | null = null;
+
+  let updateVersion: string | null = null;
+  let updateInstalling = false;
+  let updateDone = false;
 
   $: isOffline = !$authToken;
   $: statusColor = $session.status === "active" ? "#22c55e" : $session.status === "on_break" ? "#f59e0b" : "#6b7280";
@@ -45,6 +50,10 @@
     unlisten = await listen<LiveCounters>("live-counters", (e) => {
       liveCounters = e.payload;
     });
+
+    checkUpdate().then(update => {
+      if (update) updateVersion = update.version;
+    }).catch(() => {});
   });
 
   onDestroy(() => {
@@ -140,6 +149,23 @@
     return n.toLocaleString();
   }
 
+  async function installUpdate() {
+    if (!updateVersion || updateInstalling) return;
+    updateInstalling = true;
+    try {
+      const update = await checkUpdate();
+      if (update) {
+        await update.downloadAndInstall();
+        updateDone = true;
+        updateVersion = null;
+      }
+    } catch (e) {
+      errorMessage.set("Update failed: " + String(e));
+    } finally {
+      updateInstalling = false;
+    }
+  }
+
   function formatBreakLabel(config: BreakConfig): string {
     const duration = config.duration_minutes > 0 ? ` (${config.duration_minutes}m)` : "";
     if (config.auto_start_enabled && config.auto_start_time && config.auto_end_time) {
@@ -163,8 +189,17 @@
     {#if $isAdmin}
       <button class="icon-btn" on:click={() => dispatch("admin")} title="Team Status">👥</button>
     {/if}
+    {#if updateVersion}
+      <button class="icon-btn update-btn" on:click={installUpdate} disabled={updateInstalling} title="Update to v{updateVersion}">
+        {updateInstalling ? "…" : "↑"}
+      </button>
+    {/if}
     <button class="icon-btn" on:click={() => dispatch("settings")} title="Settings">⚙</button>
   </header>
+
+  {#if updateDone}
+    <div class="update-banner">Update installed — restart the app to apply.</div>
+  {/if}
 
   <div class="body">
     <!-- Timer -->
@@ -358,6 +393,9 @@
     border-radius: 4px; line-height: 1; flex-shrink: 0;
   }
   .icon-btn:hover { color: #c0c0d0; background: #1e1e2a; }
+  .update-btn { color: #22c55e; }
+  .update-btn:hover { color: #4ade80; background: #0f2a1a; }
+  .update-banner { margin: 0 12px; padding: 8px 12px; background: #0f2a1a; border: 1px solid #166534; border-radius: 8px; font-size: 11px; color: #4ade80; flex-shrink: 0; }
 
   .badge {
     font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
