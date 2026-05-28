@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ClankerClocker",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "identifier": "com.arcodify.clankerclocker",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,6 +36,7 @@
   "bundle": {
     "active": true,
     "publisher": "Arcodify",
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
