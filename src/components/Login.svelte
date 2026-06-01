@@ -1,7 +1,14 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, authToken, userId, isAdmin, userName, errorMessage } from "../lib/stores";
+  import { createEventDispatcher, onMount } from "svelte";
+  import {
+    authToken,
+    errorMessage,
+    isAdmin,
+    settings,
+    userId,
+    userName,
+  } from "../lib/stores";
 
   const dispatch = createEventDispatcher();
 
@@ -54,19 +61,25 @@
 
 <div class="login">
   <div class="logo">
-    <div class="logo-icon">⏱</div>
-    <div class="logo-name">ClankerClocker</div>
-    <div class="logo-sub">by @arcodify</div>
+    <img class="logo-mark" src="/arcodify-logo.svg" alt="Arcodify" />
+    <div class="text-h2 logo-name">ClankerClocker</div>
   </div>
 
-  <div class="form">
-    <label>
-      <span>Email</span>
-      <input bind:value={pbEmail} placeholder="you@company.com" type="email" autocomplete="off" />
-    </label>
-    <label>
-      <span>Password</span>
+  <div class="app-card form">
+    <label class="app-field">
+      <span class="app-label">Email</span>
       <input
+        class="app-input"
+        bind:value={pbEmail}
+        placeholder="you@company.com"
+        type="email"
+        autocomplete="off"
+      />
+    </label>
+    <label class="app-field">
+      <span class="app-label">Password</span>
+      <input
+        class="app-input"
         bind:value={pbPassword}
         placeholder="••••••••"
         type="password"
@@ -75,14 +88,19 @@
       />
     </label>
 
-    <button class="advanced-toggle" type="button" on:click={() => (showAdvanced = !showAdvanced)}>
+    <button
+      class="app-button app-button-ghost app-button-sm advanced-toggle"
+      type="button"
+      on:click={() => (showAdvanced = !showAdvanced)}
+    >
       {showAdvanced ? "Hide advanced" : "Advanced"}
     </button>
 
     {#if showAdvanced}
-      <label>
-        <span>Server</span>
+      <label class="app-field">
+        <span class="app-label">Server</span>
         <input
+          class="app-input"
           bind:value={pbUrl}
           placeholder="https://pb.yourcompany.com"
           type="url"
@@ -91,17 +109,24 @@
       </label>
     {/if}
 
-    <button class="btn-connect" on:click={connect} disabled={loading}>
+    <button
+      class="app-button app-button-primary app-button-lg app-button-block"
+      on:click={connect}
+      disabled={loading}
+    >
       {loading ? "Connecting…" : "Sign In"}
     </button>
 
     <div class="divider">or</div>
 
-    <button class="btn-skip" on:click={() => dispatch("skip")}>
+    <button
+      class="app-button app-button-outline app-button-md app-button-block"
+      on:click={() => dispatch("skip")}
+    >
       Work offline — sync later
     </button>
 
-    <div class="offline-note">
+    <div class="app-help offline-note">
       Activity is saved locally and synced when you sign in.
     </div>
   </div>
@@ -114,85 +139,59 @@
     height: 100vh;
     align-items: center;
     justify-content: center;
-    padding: 28px 24px;
-    gap: 28px;
+    padding: 32px 24px;
+    gap: 22px;
   }
-  .logo { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .logo-icon { font-size: 38px; line-height: 1; }
-  .logo-name { font-size: 20px; font-weight: 700; color: #f0f0f5; letter-spacing: 0.5px; }
-  .logo-sub { font-size: 12px; color: #4a4a62; }
-
-  .form { width: 100%; display: flex; flex-direction: column; gap: 11px; }
-  label { display: flex; flex-direction: column; gap: 4px; }
-  label span { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #4a4a62; }
-  input {
-    background: #13131a;
-    border: 1px solid #252530;
-    border-radius: 7px;
-    padding: 9px 12px;
-    color: #e0e0ec;
-    font-size: 13px;
-    outline: none;
-    width: 100%;
-    transition: border-color 0.15s;
+  .logo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
   }
-  input:focus { border-color: #6366f1; }
-
-  .btn-connect {
-    background: #6366f1;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 11px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    margin-top: 4px;
-    transition: background 0.15s;
+  .logo-mark {
+    display: block;
+    height: 58px;
+    max-width: 200px;
+    object-fit: contain;
+    width: 200px;
   }
-  .btn-connect:hover:not(:disabled) { background: #4f46e5; }
-  .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  .form {
+    width: min(100%, 360px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px;
+  }
   .advanced-toggle {
     align-self: flex-start;
-    background: transparent;
-    border: none;
-    color: #6b7280;
-    font-size: 12px;
-    padding: 0;
-    cursor: pointer;
+    padding-left: 0;
+    padding-right: 0;
   }
-  .advanced-toggle:hover { color: #a0a0bc; }
-
   .divider {
     text-align: center;
     font-size: 11px;
-    color: #2e2e42;
+    color: hsl(var(--muted-foreground) / 0.6);
     position: relative;
     margin: 2px 0;
   }
-  .divider::before, .divider::after {
-    content: '';
+  .divider::before,
+  .divider::after {
+    content: "";
     position: absolute;
     top: 50%;
     width: 44%;
     height: 1px;
-    background: #1e1e28;
+    background: hsl(var(--border));
   }
-  .divider::before { left: 0; }
-  .divider::after { right: 0; }
-
-  .btn-skip {
-    background: transparent;
-    border: 1px solid #252530;
-    border-radius: 8px;
-    padding: 10px;
-    color: #5a5a72;
-    font-size: 13px;
-    cursor: pointer;
-    transition: all 0.15s;
+  .divider::before {
+    left: 0;
   }
-  .btn-skip:hover { border-color: #3a3a52; color: #8080a0; }
+  .divider::after {
+    right: 0;
+  }
 
-  .offline-note { font-size: 11px; color: #2e2e42; text-align: center; line-height: 1.5; }
+  .offline-note {
+    text-align: center;
+  }
 </style>

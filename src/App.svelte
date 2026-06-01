@@ -1,18 +1,28 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import {
-    session, latestActivity, networkFeed, settings,
-    authToken, userId, isAdmin, userName,
-    errorMessage, view, elapsedSeconds,
-    todayStats,
-  } from "./lib/stores";
-  import type { SessionState, ActivitySnapshot, NetworkConnection, TodayStats } from "./lib/types";
-  import Login from "./components/Login.svelte";
-  import Dashboard from "./components/Dashboard.svelte";
-  import Settings from "./components/Settings.svelte";
+  import { onMount } from "svelte";
   import AdminView from "./components/AdminView.svelte";
+  import Dashboard from "./components/Dashboard.svelte";
+  import Login from "./components/Login.svelte";
+  import Settings from "./components/Settings.svelte";
+  import {
+    authToken,
+    elapsedSeconds,
+    errorMessage,
+    latestActivity,
+    networkFeed,
+    session,
+    settings,
+    userId,
+    userName,
+    view,
+  } from "./lib/stores";
+  import type {
+    ActivitySnapshot,
+    NetworkConnection,
+    SessionState,
+  } from "./lib/types";
 
   let ticker: ReturnType<typeof setInterval>;
 
@@ -30,7 +40,11 @@
       }>("get_settings");
 
       // Always restore URL and email so Login form is pre-filled
-      settings.update((s) => ({ ...s, pb_url: saved.pb_url, pb_email: saved.pb_email }));
+      settings.update((s) => ({
+        ...s,
+        pb_url: saved.pb_url,
+        pb_email: saved.pb_email,
+      }));
 
       if (saved.pb_token && saved.token_saved_at) {
         const ageMs = Date.now() - new Date(saved.token_saved_at).getTime();
@@ -53,7 +67,7 @@
       if (state.status !== "idle" && state.clock_in) {
         const start = new Date(state.clock_in).getTime();
         elapsedSeconds.set(
-          Math.floor((Date.now() - start) / 1000) - state.total_break_seconds
+          Math.floor((Date.now() - start) / 1000) - state.total_break_seconds,
         );
         startTicker();
         view.set("dashboard");
@@ -69,7 +83,8 @@
       } else if (e.payload.status === "active" && e.payload.clock_in) {
         const start = new Date(e.payload.clock_in).getTime();
         elapsedSeconds.set(
-          Math.floor((Date.now() - start) / 1000) - e.payload.total_break_seconds
+          Math.floor((Date.now() - start) / 1000) -
+            e.payload.total_break_seconds,
         );
         startTicker();
       }
@@ -127,28 +142,22 @@
 </main>
 
 <style>
-  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
-  :global(body) {
-    font-family: "Inter", system-ui, sans-serif;
-    background: #0d0d0f;
-    color: #e8e8ec;
+  main {
     height: 100vh;
-    overflow: hidden;
-    user-select: none;
-    -webkit-user-select: none;
+    display: flex;
+    flex-direction: column;
   }
-  main { height: 100vh; display: flex; flex-direction: column; }
 
   .error-toast {
     position: fixed;
     bottom: 16px;
     left: 50%;
     transform: translateX(-50%);
-    background: #2a0a0a;
-    border: 1px solid #7f1d1d;
-    color: #fca5a5;
+    background: hsl(var(--destructive-muted));
+    border: 1px solid hsl(var(--destructive));
+    color: hsl(var(--destructive-muted-foreground));
     padding: 8px 18px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     font-size: 12px;
     z-index: 100;
     max-width: 340px;
