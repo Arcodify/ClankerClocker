@@ -209,19 +209,22 @@ pub async fn authenticate_pb(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut cfg = state.config.lock();
-    cfg.pb_url = pb_url;
-    cfg.pb_email = pb_email;
-    cfg.pb_token = auth.token.clone();
-    cfg.user_id = auth.record.id.clone();
-    cfg.user_name = auth.record.name.clone();
-    cfg.user_email = auth.record.email.clone();
-    cfg.is_admin = auth.record.is_admin;
-    cfg.token_saved_at = Utc::now().to_rfc3339();
+    let pb = {
+        let mut cfg = state.config.lock();
+        cfg.pb_url = pb_url;
+        cfg.pb_email = pb_email;
+        cfg.pb_token = auth.token.clone();
+        cfg.user_id = auth.record.id.clone();
+        cfg.user_name = auth.record.name.clone();
+        cfg.user_email = auth.record.email.clone();
+        cfg.is_admin = auth.record.is_admin;
+        cfg.token_saved_at = Utc::now().to_rfc3339();
+        PocketBase::new(cfg.pb_url.clone(), cfg.pb_token.clone())
+        // cfg guard dropped here, before any await
+    };
 
-    // Fetch company settings on login
-    let pb = PocketBase::new(cfg.pb_url.clone(), cfg.pb_token.clone());
     if let Ok(settings) = pb.get_company_settings().await {
+        let mut cfg = state.config.lock();
         if let Some(ci) = settings["clock_in_time"].as_str() {
             cfg.clock_in_time = ci.to_string();
         }
@@ -232,14 +235,17 @@ pub async fn authenticate_pb(
             cfg.auto_clock_out_enabled = ao;
         }
     }
-    drop(cfg);
 
-    // Persist to local db
-    {
-        let cfg = state.config.lock().clone();
-        let db = state.db.lock();
-        db.save_config(&cfg).map_err(|e| e.to_string())?;
-    }
+    let (cfg_save, token_saved_at) = {
+        let cfg = state.config.lock();
+        (cfg.clone(), cfg.token_saved_at.clone())
+    };
+    
+    state
+        .db
+        .lock()
+        .save_config(&cfg_save)
+        .map_err(|e| e.to_string())?;
 
     Ok(json!({
         "token": auth.token,
@@ -247,12 +253,12 @@ pub async fn authenticate_pb(
         "user_name": auth.record.name,
         "user_email": auth.record.email,
         "is_admin": auth.record.is_admin,
-        "token_saved_at": state.config.lock().token_saved_at,
+        "token_saved_at": token_saved_at,
     }))
 }
 
 #[tauri::command]
-pub async fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let cfg = state.config.lock();
     Ok(json!({
         "pb_url": cfg.pb_url,
@@ -614,17 +620,20 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut cfg = state.config.lock();
-    if !user.name.trim().is_empty() {
-        cfg.user_name = user.name.trim().to_string();
+    {
+        let mut cfg = state.config.lock();
+        if !user.name.trim().is_empty() {
+            cfg.user_name = user.name.trim().to_string();
+        }
+        if !user.email.trim().is_empty() {
+            cfg.user_email = user.email.trim().to_string();
+        }
+        cfg.is_admin = user.is_admin;
     }
-    if !user.email.trim().is_empty() {
-        cfg.user_email = user.email.trim().to_string();
-    }
-    cfg.is_admin = user.is_admin;
-    
-    // Also sync company settings during auth refresh
+
+    // Also sync company settings during auth refresh — drop lock before await
     if let Ok(settings) = pb.get_company_settings().await {
+        let mut cfg = state.config.lock();
         if let Some(ci) = settings["clock_in_time"].as_str() {
             cfg.clock_in_time = ci.to_string();
         }
@@ -636,21 +645,32 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         }
     }
 
-    let cfg_clone = cfg.clone();
-    drop(cfg);
+    let (cfg_save, user_name, user_email, is_admin, clock_in, clock_out, auto_out) = {
+        let cfg = state.config.lock();
+        (
+            cfg.clone(),
+            cfg.user_name.clone(),
+            cfg.user_email.clone(),
+            cfg.is_admin,
+            cfg.clock_in_time.clone(),
+            cfg.clock_out_time.clone(),
+            cfg.auto_clock_out_enabled,
+        )
+    };
+
     state
         .db
         .lock()
-        .save_config(&cfg_clone)
+        .save_config(&cfg_save)
         .map_err(|e| e.to_string())?;
 
     Ok(json!({
-        "user_name": cfg_clone.user_name,
-        "user_email": cfg_clone.user_email,
-        "is_admin": cfg_clone.is_admin,
-        "clock_in_time": cfg_clone.clock_in_time,
-        "clock_out_time": cfg_clone.clock_out_time,
-        "auto_clock_out_enabled": cfg_clone.auto_clock_out_enabled,
+        "user_name": user_name,
+        "user_email": user_email,
+        "is_admin": is_admin,
+        "clock_in_time": clock_in,
+        "clock_out_time": clock_out,
+        "auto_clock_out_enabled": auto_out,
     }))
 }
 

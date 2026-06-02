@@ -98,25 +98,41 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
         .name("input-monitor".into())
         .spawn(move || {
             loop {
-                active_flag.store(true, Ordering::Relaxed);
-                let flag = active_flag.clone();
                 let counters_ref = counters.clone();
+                let active_flag_ref = active_flag.clone();
 
                 if let Err(e) = listen(move |event: Event| {
-                    let mut c = counters_ref.lock();
-                    c.last_activity = Some(std::time::Instant::now());
-                    match event.event_type {
-                        EventType::KeyPress(_) => c.keystrokes += 1,
-                        EventType::ButtonPress(_) => c.mouse_clicks += 1,
-                        EventType::MouseMove { x, y } => {
-                            let dx = x - c.last_mouse_x;
-                            let dy = y - c.last_mouse_y;
-                            c.mouse_distance_px += (dx * dx + dy * dy).sqrt();
-                            c.last_mouse_x = x;
-                            c.last_mouse_y = y;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if let Some(mut c) = counters_ref.try_lock() {
+                            c.last_activity = Some(std::time::Instant::now());
+                            match event.event_type {
+                                EventType::KeyPress(_) => {
+                                    c.keystrokes += 1;
+                                    active_flag_ref.store(true, Ordering::Relaxed);
+                                }
+                                EventType::ButtonPress(_) => {
+                                    c.mouse_clicks += 1;
+                                    active_flag_ref.store(true, Ordering::Relaxed);
+                                }
+                                EventType::MouseMove { x, y } => {
+                                    if x.is_finite() && y.is_finite() {
+                                        if c.last_mouse_x != 0.0 || c.last_mouse_y != 0.0 {
+                                            let dx = x - c.last_mouse_x;
+                                            let dy = y - c.last_mouse_y;
+                                            let dist = (dx * dx + dy * dy).sqrt();
+                                            if dist.is_finite() && dist < 5000.0 {
+                                                c.mouse_distance_px += dist;
+                                            }
+                                        }
+                                        c.last_mouse_x = x;
+                                        c.last_mouse_y = y;
+                                        active_flag_ref.store(true, Ordering::Relaxed);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
-                        _ => {}
-                    }
+                    }));
                 }) {
                     active_flag.store(false, Ordering::Relaxed);
                     log::warn!("Input monitor failed: {:?}", e);

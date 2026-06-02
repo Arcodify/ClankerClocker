@@ -200,19 +200,6 @@ impl PocketBase {
         self.get_record("users", user_id).await
     }
 
-    pub async fn update_user_profile(
-        &self,
-        user_id: &str,
-        name: &str,
-    ) -> Result<()> {
-        self.patch(
-            "users",
-            user_id,
-            json!({ "name": name }),
-        )
-        .await
-    }
-
     /// Close any active/on_break sessions for a user (called before creating a new session).
     pub async fn close_stale_sessions(
         &self,

@@ -42,6 +42,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("no app data dir");
@@ -524,31 +525,6 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
-}
-
-fn find_due_auto_break(configs: &[BreakConfig], history: &HashSet<String>) -> Option<BreakConfig> {
-    let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60)?;
-    let now_nepal = Utc::now().with_timezone(&nepal_offset);
-    let now_time = NaiveTime::from_hms_opt(now_nepal.hour(), now_nepal.minute(), 0)?;
-
-    configs.iter().find_map(|config| {
-        if !config.auto_start_enabled {
-            return None;
-        }
-
-        let key = auto_break_history_key(&config.id);
-        if history.contains(&key) {
-            return None;
-        }
-
-        let start_time = parse_hhmm(config.auto_start_time.as_deref()?)?;
-        let end_time = parse_hhmm(config.auto_end_time.as_deref()?)?;
-        if now_time >= start_time && now_time <= end_time {
-            Some(config.clone())
-        } else {
-            None
-        }
-    })
 }
 
 fn auto_break_history_key(config_id: &str) -> String {
