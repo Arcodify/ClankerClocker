@@ -1,9 +1,9 @@
-use std::collections::{HashSet, HashMap};
+use crate::session::NetworkConnection;
+use chrono::Utc;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::mpsc;
 use std::time::Duration;
-use chrono::Utc;
-use crate::session::NetworkConnection;
 
 pub fn sample_connections(
     seen: &mut HashSet<String>,
@@ -16,23 +16,26 @@ pub fn sample_connections(
     #[cfg(target_os = "windows")]
     return windows_connections(seen, dns_cache);
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    { let _ = (seen, dns_cache); Vec::new() }
+    {
+        let _ = (seen, dns_cache);
+        Vec::new()
+    }
 }
 
 // ── Well-known port → service label ─────────────────────────────────────────
 
 fn port_service(port: u16) -> Option<&'static str> {
     match port {
-        80   => Some("HTTP"),
-        443  => Some("HTTPS"),
-        22   => Some("SSH"),
-        21   => Some("FTP"),
-        25   => Some("SMTP"),
-        465  => Some("SMTPS"),
-        587  => Some("SMTP"),
-        993  => Some("IMAP"),
-        995  => Some("POP3"),
-        53   => Some("DNS"),
+        80 => Some("HTTP"),
+        443 => Some("HTTPS"),
+        22 => Some("SSH"),
+        21 => Some("FTP"),
+        25 => Some("SMTP"),
+        465 => Some("SMTPS"),
+        587 => Some("SMTP"),
+        993 => Some("IMAP"),
+        995 => Some("POP3"),
+        53 => Some("DNS"),
         3306 => Some("MySQL"),
         5432 => Some("PostgreSQL"),
         6379 => Some("Redis"),
@@ -49,7 +52,7 @@ fn port_service(port: u16) -> Option<&'static str> {
         1194 => Some("OpenVPN"),
         1337 => Some("Tailscale"),
         41641 => Some("Tailscale"),
-        _    => None,
+        _ => None,
     }
 }
 
@@ -57,11 +60,16 @@ fn port_service(port: u16) -> Option<&'static str> {
 // e.g. "lhr25s12-in-f14.1e100.net" → "google.com"
 //      "142.250.80.46" → keep as-is
 fn clean_hostname(ptr: &str, ip: &str) -> String {
-    if ptr == ip || ptr.is_empty() { return ip.to_string(); }
+    if ptr == ip || ptr.is_empty() {
+        return ip.to_string();
+    }
 
     // Map well-known CDN hostnames to their parent service
     let lower = ptr.to_lowercase();
-    let friendly = if lower.contains("googlevideo") || lower.contains("1e100") || lower.contains("googleusercontent") {
+    let friendly = if lower.contains("googlevideo")
+        || lower.contains("1e100")
+        || lower.contains("googleusercontent")
+    {
         Some("google.com")
     } else if lower.contains("youtube") {
         Some("youtube.com")
@@ -73,7 +81,10 @@ fn clean_hostname(ptr: &str, ip: &str) -> String {
         Some("aws.amazon.com")
     } else if lower.contains("cloudfront") {
         Some("cloudfront.net")
-    } else if lower.contains("akamai") || lower.contains("akamaitechnologies") || lower.contains("akamaiedge") {
+    } else if lower.contains("akamai")
+        || lower.contains("akamaitechnologies")
+        || lower.contains("akamaiedge")
+    {
         Some("akamai-cdn")
     } else if lower.contains("cloudflare") {
         Some("cloudflare.com")
@@ -120,25 +131,31 @@ fn clean_hostname(ptr: &str, ip: &str) -> String {
 // ── Parallel DNS with timeout ────────────────────────────────────────────────
 
 fn resolve_batch(ips: &[String], cache: &mut HashMap<String, String>) {
-    let uncached: Vec<String> = ips.iter()
+    let uncached: Vec<String> = ips
+        .iter()
         .filter(|ip| !cache.contains_key(*ip))
         .cloned()
         .collect();
-    if uncached.is_empty() { return; }
+    if uncached.is_empty() {
+        return;
+    }
 
-    let handles: Vec<(String, mpsc::Receiver<String>)> = uncached.into_iter().map(|ip| {
-        let (tx, rx) = mpsc::channel();
-        let ip2 = ip.clone();
-        std::thread::spawn(move || {
-            let result = if let Ok(addr) = ip2.parse::<IpAddr>() {
-                dns_lookup::lookup_addr(&addr).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let _ = tx.send(result);
-        });
-        (ip, rx)
-    }).collect();
+    let handles: Vec<(String, mpsc::Receiver<String>)> = uncached
+        .into_iter()
+        .map(|ip| {
+            let (tx, rx) = mpsc::channel();
+            let ip2 = ip.clone();
+            std::thread::spawn(move || {
+                let result = if let Ok(addr) = ip2.parse::<IpAddr>() {
+                    dns_lookup::lookup_addr(&addr).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let _ = tx.send(result);
+            });
+            (ip, rx)
+        })
+        .collect();
 
     // Collect all results with a shared deadline of 800ms
     let deadline = std::time::Instant::now() + Duration::from_millis(800);
@@ -157,7 +174,10 @@ fn resolve_batch(ips: &[String], cache: &mut HashMap<String, String>) {
 // ── Linux ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn linux_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String, String>) -> Vec<NetworkConnection> {
+fn linux_connections(
+    seen: &mut HashSet<String>,
+    dns_cache: &mut HashMap<String, String>,
+) -> Vec<NetworkConnection> {
     use std::process::Command;
     let out = Command::new("ss")
         .args(["-tnp", "--no-header"])
@@ -169,20 +189,30 @@ fn linux_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String,
 }
 
 #[cfg(target_os = "linux")]
-fn parse_ss_output(output: &str, seen: &mut HashSet<String>, dns_cache: &mut HashMap<String, String>) -> Vec<NetworkConnection> {
+fn parse_ss_output(
+    output: &str,
+    seen: &mut HashSet<String>,
+    dns_cache: &mut HashMap<String, String>,
+) -> Vec<NetworkConnection> {
     let now = Utc::now();
     let mut raw_entries: Vec<(String, u16, u16, String)> = Vec::new(); // (remote_ip, remote_port, local_port, process_name)
 
     for line in output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 || parts[0] != "ESTAB" { continue; }
+        if parts.len() < 5 || parts[0] != "ESTAB" {
+            continue;
+        }
 
         let (remote_ip, remote_port) = parse_addr(parts[4]);
         let (_, local_port) = parse_addr(parts[3]);
-        if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) { continue; }
+        if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) {
+            continue;
+        }
 
         let key = format!("{}:{}-{}", remote_ip, remote_port, local_port);
-        if seen.contains(&key) { continue; }
+        if seen.contains(&key) {
+            continue;
+        }
         seen.insert(key);
 
         let proc_info = parts.get(5).copied().unwrap_or("");
@@ -194,18 +224,33 @@ fn parse_ss_output(output: &str, seen: &mut HashSet<String>, dns_cache: &mut Has
     let ips: Vec<String> = raw_entries.iter().map(|(ip, ..)| ip.clone()).collect();
     resolve_batch(&ips, dns_cache);
 
-    raw_entries.into_iter().map(|(remote_ip, remote_port, local_port, process_name)| {
-        let host = dns_cache.get(&remote_ip).cloned().unwrap_or_else(|| remote_ip.clone());
-        let host = annotate_with_service(host, remote_port);
-        NetworkConnection { timestamp: now, process_name, remote_host: host, remote_ip, remote_port, local_port }
-    }).collect()
+    raw_entries
+        .into_iter()
+        .map(|(remote_ip, remote_port, local_port, process_name)| {
+            let host = dns_cache
+                .get(&remote_ip)
+                .cloned()
+                .unwrap_or_else(|| remote_ip.clone());
+            let host = annotate_with_service(host, remote_port);
+            NetworkConnection {
+                timestamp: now,
+                process_name,
+                remote_host: host,
+                remote_ip,
+                remote_port,
+                local_port,
+            }
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
 fn extract_process_linux(proc_info: &str) -> String {
     if let Some(start) = proc_info.find('"') {
         let rest = &proc_info[start + 1..];
-        if let Some(end) = rest.find('"') { return rest[..end].to_string(); }
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
     }
     String::new()
 }
@@ -213,7 +258,10 @@ fn extract_process_linux(proc_info: &str) -> String {
 // ── macOS ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
-fn macos_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String, String>) -> Vec<NetworkConnection> {
+fn macos_connections(
+    seen: &mut HashSet<String>,
+    dns_cache: &mut HashMap<String, String>,
+) -> Vec<NetworkConnection> {
     use std::process::Command;
     let out = Command::new("lsof")
         .args(["-i", "TCP", "-n", "-P", "-s", "TCP:ESTABLISHED"])
@@ -225,47 +273,78 @@ fn macos_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String,
     let mut raw: Vec<(String, u16, u16, String)> = Vec::new();
     for line in out.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 9 { continue; }
+        if parts.len() < 9 {
+            continue;
+        }
         let process_name = parts[0].to_string();
         if let Some((local, remote)) = parts[8].split_once("->") {
             let (remote_ip, remote_port) = parse_addr(remote);
             let (_, local_port) = parse_addr(local);
-            if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) { continue; }
+            if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) {
+                continue;
+            }
             let key = format!("{}:{}-{}", remote_ip, remote_port, local_port);
-            if seen.contains(&key) { continue; }
+            if seen.contains(&key) {
+                continue;
+            }
             seen.insert(key);
             raw.push((remote_ip, remote_port, local_port, process_name));
         }
     }
     let ips: Vec<String> = raw.iter().map(|(ip, ..)| ip.clone()).collect();
     resolve_batch(&ips, dns_cache);
-    raw.into_iter().map(|(remote_ip, remote_port, local_port, process_name)| {
-        let host = dns_cache.get(&remote_ip).cloned().unwrap_or_else(|| remote_ip.clone());
-        let host = annotate_with_service(host, remote_port);
-        NetworkConnection { timestamp: now, process_name, remote_host: host, remote_ip, remote_port, local_port }
-    }).collect()
+    raw.into_iter()
+        .map(|(remote_ip, remote_port, local_port, process_name)| {
+            let host = dns_cache
+                .get(&remote_ip)
+                .cloned()
+                .unwrap_or_else(|| remote_ip.clone());
+            let host = annotate_with_service(host, remote_port);
+            NetworkConnection {
+                timestamp: now,
+                process_name,
+                remote_host: host,
+                remote_ip,
+                remote_port,
+                local_port,
+            }
+        })
+        .collect()
 }
 
 // ── Windows ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-fn windows_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<String, String>) -> Vec<NetworkConnection> {
+fn windows_connections(
+    seen: &mut HashSet<String>,
+    dns_cache: &mut HashMap<String, String>,
+) -> Vec<NetworkConnection> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = Command::new("netstat").args(["-ano"])
+    let out = Command::new("netstat")
+        .args(["-ano"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
     let now = Utc::now();
     let mut raw: Vec<(String, u16, u16, String)> = Vec::new();
     for line in out.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 || parts[0] != "TCP" || parts[3] != "ESTABLISHED" { continue; }
+        if parts.len() < 5 || parts[0] != "TCP" || parts[3] != "ESTABLISHED" {
+            continue;
+        }
         let (remote_ip, remote_port) = parse_addr(parts[2]);
         let (_, local_port) = parse_addr(parts[1]);
-        if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) { continue; }
+        if remote_ip.is_empty() || is_private_or_loopback(&remote_ip) {
+            continue;
+        }
         let key = format!("{}:{}-{}", remote_ip, remote_port, local_port);
-        if seen.contains(&key) { continue; }
+        if seen.contains(&key) {
+            continue;
+        }
         seen.insert(key);
         let pid: u32 = parts[4].parse().unwrap_or(0);
         let process_name = get_process_name_windows(pid);
@@ -273,11 +352,23 @@ fn windows_connections(seen: &mut HashSet<String>, dns_cache: &mut HashMap<Strin
     }
     let ips: Vec<String> = raw.iter().map(|(ip, ..)| ip.clone()).collect();
     resolve_batch(&ips, dns_cache);
-    raw.into_iter().map(|(remote_ip, remote_port, local_port, process_name)| {
-        let host = dns_cache.get(&remote_ip).cloned().unwrap_or_else(|| remote_ip.clone());
-        let host = annotate_with_service(host, remote_port);
-        NetworkConnection { timestamp: now, process_name, remote_host: host, remote_ip, remote_port, local_port }
-    }).collect()
+    raw.into_iter()
+        .map(|(remote_ip, remote_port, local_port, process_name)| {
+            let host = dns_cache
+                .get(&remote_ip)
+                .cloned()
+                .unwrap_or_else(|| remote_ip.clone());
+            let host = annotate_with_service(host, remote_port);
+            NetworkConnection {
+                timestamp: now,
+                process_name,
+                remote_host: host,
+                remote_ip,
+                remote_port,
+                local_port,
+            }
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -288,9 +379,15 @@ fn get_process_name_windows(pid: u32) -> String {
     Command::new("tasklist")
         .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output().ok()
+        .output()
+        .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.lines().next().and_then(|l| l.split(',').next()).map(|s| s.trim_matches('"').to_string()))
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .and_then(|l| l.split(',').next())
+                .map(|s| s.trim_matches('"').to_string())
+        })
         .unwrap_or_default()
 }
 
@@ -311,15 +408,25 @@ fn parse_addr(addr: &str) -> (String, u16) {
 }
 
 fn is_private_or_loopback(ip: &str) -> bool {
-    if ip.starts_with("127.") || ip == "::1" { return true; }
-    if ip.starts_with("169.254.") { return true; }
+    if ip.starts_with("127.") || ip == "::1" {
+        return true;
+    }
+    if ip.starts_with("169.254.") {
+        return true;
+    }
     // Skip RFC-1918 private ranges
-    if ip.starts_with("10.") { return true; }
-    if ip.starts_with("192.168.") { return true; }
+    if ip.starts_with("10.") {
+        return true;
+    }
+    if ip.starts_with("192.168.") {
+        return true;
+    }
     if let Some(second) = ip.split('.').nth(1) {
         if ip.starts_with("172.") {
             if let Ok(n) = second.parse::<u8>() {
-                if (16..=31).contains(&n) { return true; }
+                if (16..=31).contains(&n) {
+                    return true;
+                }
             }
         }
     }

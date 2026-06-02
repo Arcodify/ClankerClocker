@@ -15,6 +15,7 @@ pub struct SessionState {
     pub session_id: Option<String>,
     pub clock_in: Option<DateTime<Utc>>,
     pub break_start: Option<DateTime<Utc>>,
+    pub break_name: Option<String>,
     pub total_break_seconds: i64,
     pub break_count: u32,
 }
@@ -26,6 +27,7 @@ impl Default for SessionState {
             session_id: None,
             clock_in: None,
             break_start: None,
+            break_name: None,
             total_break_seconds: 0,
             break_count: 0,
         }
@@ -160,6 +162,10 @@ pub struct AppConfig {
     pub user_id: String,
     pub user_name: String,
     pub user_email: String,
+    pub is_admin: bool,
+    pub clock_in_time: String,
+    pub clock_out_time: String,
+    pub auto_clock_out_enabled: bool,
     pub token_saved_at: String, // RFC3339; empty means no saved token
 }
 
@@ -172,7 +178,17 @@ impl Default for AppConfig {
             user_id: String::new(),
             user_name: String::new(),
             user_email: String::new(),
+            is_admin: false,
+            clock_in_time: "09:00".into(),
+            clock_out_time: "18:00".into(),
+            auto_clock_out_enabled: true,
             token_saved_at: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppNotification {
+    pub title: String,
+    pub body: String,
 }

@@ -1,6 +1,6 @@
+use crate::session::{ActivitySnapshot, AppConfig, NetworkConnection};
 use anyhow::Result;
-use rusqlite::{Connection, params};
-use crate::session::{ActivitySnapshot, NetworkConnection, AppConfig};
+use rusqlite::{params, Connection};
 
 pub struct LocalDb {
     conn: Connection,
@@ -15,7 +15,8 @@ impl LocalDb {
     }
 
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch("
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS config (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -36,7 +37,8 @@ impl LocalDb {
                 created_at  TEXT NOT NULL,
                 synced      INTEGER NOT NULL DEFAULT 0
             );
-        ")?;
+        ",
+        )?;
         Ok(())
     }
 
@@ -48,6 +50,13 @@ impl LocalDb {
             ("user_id", &cfg.user_id),
             ("user_name", &cfg.user_name),
             ("user_email", &cfg.user_email),
+            ("is_admin", &cfg.is_admin.to_string()),
+            ("clock_in_time", &cfg.clock_in_time),
+            ("clock_out_time", &cfg.clock_out_time),
+            (
+                "auto_clock_out_enabled",
+                &cfg.auto_clock_out_enabled.to_string(),
+            ),
             ("token_saved_at", &cfg.token_saved_at),
         ];
         for (k, v) in &pairs {
@@ -74,6 +83,10 @@ impl LocalDb {
                 "user_id" => cfg.user_id = row.1,
                 "user_name" => cfg.user_name = row.1,
                 "user_email" => cfg.user_email = row.1,
+                "is_admin" => cfg.is_admin = row.1 == "true",
+                "clock_in_time" => cfg.clock_in_time = row.1,
+                "clock_out_time" => cfg.clock_out_time = row.1,
+                "auto_clock_out_enabled" => cfg.auto_clock_out_enabled = row.1 != "false",
                 "token_saved_at" => cfg.token_saved_at = row.1,
                 _ => {}
             }
@@ -142,12 +155,18 @@ impl LocalDb {
     }
 
     pub fn mark_snapshot_synced(&self, id: i64) -> Result<()> {
-        self.conn.execute("UPDATE pending_snapshots SET synced = 1 WHERE id = ?1", params![id])?;
+        self.conn.execute(
+            "UPDATE pending_snapshots SET synced = 1 WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
     pub fn mark_network_synced(&self, id: i64) -> Result<()> {
-        self.conn.execute("UPDATE pending_network SET synced = 1 WHERE id = ?1", params![id])?;
+        self.conn.execute(
+            "UPDATE pending_network SET synced = 1 WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 }

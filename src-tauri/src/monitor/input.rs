@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
 use crate::session::ActivityCounters;
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub fn start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBool>) {
     #[cfg(target_os = "linux")]
@@ -52,8 +52,12 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                             ks += 1;
                                         }
                                     }
-                                    InputEventKind::RelAxis(RelativeAxisType::REL_X) => dx += ev.value() as f64,
-                                    InputEventKind::RelAxis(RelativeAxisType::REL_Y) => dy += ev.value() as f64,
+                                    InputEventKind::RelAxis(RelativeAxisType::REL_X) => {
+                                        dx += ev.value() as f64
+                                    }
+                                    InputEventKind::RelAxis(RelativeAxisType::REL_Y) => {
+                                        dy += ev.value() as f64
+                                    }
                                     _ => {}
                                 }
                             }

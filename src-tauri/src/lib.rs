@@ -6,9 +6,9 @@ mod pocketbase;
 mod session;
 
 use parking_lot::Mutex;
-use std::collections::{HashSet, HashMap};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -16,10 +16,13 @@ use tauri::{
     Emitter, Manager,
 };
 
+use chrono::{FixedOffset, NaiveTime, TimeZone, Timelike, Utc};
 use db::LocalDb;
-use chrono::{FixedOffset, NaiveTime, Timelike, Utc};
-use session::{ActivityCounters, ActivitySnapshot, AppConfig, BreakConfig, SessionState, SessionStatus};
 use pocketbase::PocketBase;
+use session::{
+    ActivityCounters, ActivitySnapshot, AppConfig, AppNotification, BreakConfig, SessionState,
+    SessionStatus,
+};
 
 pub struct AppState {
     pub session: Arc<Mutex<SessionState>>,
@@ -30,6 +33,8 @@ pub struct AppState {
     pub break_id: Arc<Mutex<Option<String>>>,
     pub break_configs: Arc<Mutex<Vec<BreakConfig>>>,
     pub auto_break_history: Arc<Mutex<HashSet<String>>>,
+    pub scheduled_notification_history: Arc<Mutex<HashSet<String>>>,
+    pub pending_auto_breaks: Arc<Mutex<HashSet<String>>>,
 }
 
 pub fn run() {
@@ -49,10 +54,17 @@ pub fn run() {
             let db = Arc::new(Mutex::new(db));
             let config = Arc::new(Mutex::new(config));
             let session: Arc<Mutex<SessionState>> = Arc::new(Mutex::new(SessionState::default()));
-            let counters: Arc<Mutex<ActivityCounters>> = Arc::new(Mutex::new(ActivityCounters::default()));
+            let counters: Arc<Mutex<ActivityCounters>> =
+                Arc::new(Mutex::new(ActivityCounters::default()));
             let break_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-            let break_configs: Arc<Mutex<Vec<BreakConfig>>> = Arc::new(Mutex::new(BreakConfig::defaults()));
-            let auto_break_history: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+            let break_configs: Arc<Mutex<Vec<BreakConfig>>> =
+                Arc::new(Mutex::new(BreakConfig::defaults()));
+            let auto_break_history: Arc<Mutex<HashSet<String>>> =
+                Arc::new(Mutex::new(HashSet::new()));
+            let scheduled_notification_history: Arc<Mutex<HashSet<String>>> =
+                Arc::new(Mutex::new(HashSet::new()));
+            let pending_auto_breaks: Arc<Mutex<HashSet<String>>> =
+                Arc::new(Mutex::new(HashSet::new()));
             let input_monitoring = Arc::new(AtomicBool::new(false));
 
             // System tray
@@ -81,12 +93,22 @@ pub fn run() {
                                 let (pb_url, pb_token, session_id, total_break_secs) = {
                                     let cfg = state.config.lock();
                                     let sess = state.session.lock();
-                                    (cfg.pb_url.clone(), cfg.pb_token.clone(), sess.session_id.clone(), sess.total_break_seconds)
+                                    (
+                                        cfg.pb_url.clone(),
+                                        cfg.pb_token.clone(),
+                                        sess.session_id.clone(),
+                                        sess.total_break_seconds,
+                                    )
                                 };
                                 if let Some(sid) = session_id {
-                                    if !sid.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+                                    if !sid.starts_with("local-")
+                                        && !pb_url.is_empty()
+                                        && !pb_token.is_empty()
+                                    {
                                         let pb = PocketBase::new(pb_url, pb_token);
-                                        let _ = pb.close_session(&sid, &Utc::now(), total_break_secs).await;
+                                        let _ = pb
+                                            .close_session(&sid, &Utc::now(), total_break_secs)
+                                            .await;
                                     }
                                     *state.session.lock() = SessionState::default();
                                 }
@@ -97,7 +119,11 @@ pub fn run() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
                         let app = tray.app_handle();
                         if let Some(win) = app.get_webview_window("main") {
                             if win.is_visible().unwrap_or(false) {
@@ -132,6 +158,8 @@ pub fn run() {
                 break_id: break_id.clone(),
                 break_configs: break_configs.clone(),
                 auto_break_history: auto_break_history.clone(),
+                scheduled_notification_history: scheduled_notification_history.clone(),
+                pending_auto_breaks: pending_auto_breaks.clone(),
             });
 
             // Start input monitor thread (rdev blocks its OS thread)
@@ -146,6 +174,8 @@ pub fn run() {
             let break_configs_bg = break_configs.clone();
             let break_id_bg = break_id.clone();
             let auto_break_history_bg = auto_break_history.clone();
+            let scheduled_notification_history_bg = scheduled_notification_history.clone();
+            let pending_auto_breaks_bg = pending_auto_breaks.clone();
             let input_monitoring_bg = input_monitoring.clone();
 
             tauri::async_runtime::spawn(async move {
@@ -178,22 +208,90 @@ pub fn run() {
                         }
                     }
 
-                    let status = session_bg.lock().status.clone();
+                    let now = Utc::now();
+                    let now_npt = now.with_timezone(&nepal_offset());
+                    let session_snapshot = session_bg.lock().clone();
+                    let config_snapshot = config_bg.lock().clone();
+                    let status = session_snapshot.status.clone();
+
                     if status == SessionStatus::Idle {
                         auto_break_history_bg.lock().clear();
-                        continue;
+                        pending_auto_breaks_bg.lock().clear();
                     }
 
+                    if let Some(clock_in_due) =
+                        schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_in_time)
+                    {
+                        let key = reminder_key(now_npt, "clock_in");
+                        let should_notify = status == SessionStatus::Idle
+                            && now_npt >= clock_in_due
+                            && !scheduled_notification_history_bg.lock().contains(&key);
+                        if should_notify {
+                            scheduled_notification_history_bg.lock().insert(key);
+                            app_handle
+                                .emit(
+                                    "app-notification",
+                                    AppNotification {
+                                        title: "your clockin time is here".into(),
+                                        body: "your clockin time is here".into(),
+                                    },
+                                )
+                                .ok();
+                        }
+                    }
+
+                    if let Some(clock_out_due) =
+                        schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_out_time)
+                    {
+                        let key = reminder_key(now_npt, "clock_out");
+                        let should_handle = (status == SessionStatus::Active
+                            || status == SessionStatus::OnBreak)
+                            && now_npt >= clock_out_due
+                            && !scheduled_notification_history_bg.lock().contains(&key);
+                        if should_handle {
+                            scheduled_notification_history_bg.lock().insert(key);
+                            app_handle
+                                .emit(
+                                    "app-notification",
+                                    AppNotification {
+                                        title: "your clockout time is here".into(),
+                                        body: if config_snapshot.auto_clock_out_enabled {
+                                            "your clockout time is here. auto clocking out now."
+                                                .into()
+                                        } else {
+                                            "your clockout time is here".into()
+                                        },
+                                    },
+                                )
+                                .ok();
+
+                            if config_snapshot.auto_clock_out_enabled {
+                                let _ = commands::clock_out_internal(
+                                    &app_handle,
+                                    &session_bg,
+                                    &counters_bg,
+                                    &config_bg,
+                                    &break_id_bg,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+
+                    let configs = break_configs_bg.lock().clone();
+                    let history = auto_break_history_bg.lock().clone();
+                    let pending = pending_auto_breaks_bg.lock().clone();
+
                     if status == SessionStatus::Active {
-                        let configs = break_configs_bg.lock().clone();
-                        let history = auto_break_history_bg.lock().clone();
-                        if let Some(config) = find_due_auto_break(&configs, &history) {
+                        if let Some(config) = find_pending_auto_break(&configs, &pending) {
+                            pending_auto_breaks_bg.lock().remove(&config.id);
                             if commands::start_break_internal(
                                 &app_handle,
                                 &session_bg,
                                 &config_bg,
                                 &break_id_bg,
                                 &config.type_key,
+                                Some(&config.name),
                             )
                             .await
                             .is_ok()
@@ -202,6 +300,58 @@ pub fn run() {
                                     .lock()
                                     .insert(auto_break_history_key(&config.id));
                             }
+                        } else {
+                            let due = due_auto_breaks(&configs, &history);
+                            if let Some(config) = due.first() {
+                                if commands::start_break_internal(
+                                    &app_handle,
+                                    &session_bg,
+                                    &config_bg,
+                                    &break_id_bg,
+                                    &config.type_key,
+                                    Some(&config.name),
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    auto_break_history_bg
+                                        .lock()
+                                        .insert(auto_break_history_key(&config.id));
+                                }
+                            }
+                        }
+                    } else if status == SessionStatus::OnBreak {
+                        // Check if current break should end notification
+                        let (break_start, break_name) = {
+                            let sess = session_bg.lock();
+                            (sess.break_start, sess.break_name.clone())
+                        };
+                        if let (Some(start), Some(name)) = (break_start, break_name) {
+                            let duration = (Utc::now() - start).num_minutes();
+                            // Find matching config to get planned duration
+                            if let Some(config) = configs.iter().find(|c| c.name == name) {
+                                if config.duration_minutes > 0
+                                    && duration >= config.duration_minutes as i64
+                                {
+                                    let key = reminder_key(now_npt, &format!("break_end:{}", config.id));
+                                    if !scheduled_notification_history_bg.lock().contains(&key) {
+                                        scheduled_notification_history_bg.lock().insert(key);
+                                        app_handle
+                                            .emit(
+                                                "app-notification",
+                                                AppNotification {
+                                                    title: format!("your break {name} is ending"),
+                                                    body: format!("your break {name} is ending"),
+                                                },
+                                            )
+                                            .ok();
+                                    }
+                                }
+                            }
+                        }
+
+                        for config in due_auto_breaks(&configs, &history) {
+                            pending_auto_breaks_bg.lock().insert(config.id.clone());
                         }
                     }
 
@@ -248,7 +398,11 @@ pub fn run() {
                         let (pb_url, pb_token, session_id) = {
                             let cfg = config_bg.lock();
                             let sess = session_bg.lock();
-                            (cfg.pb_url.clone(), cfg.pb_token.clone(), sess.session_id.clone())
+                            (
+                                cfg.pb_url.clone(),
+                                cfg.pb_token.clone(),
+                                sess.session_id.clone(),
+                            )
                         };
 
                         if let Some(sid) = session_id {
@@ -270,7 +424,10 @@ pub fn run() {
                         let mut seen_clone = net_seen.clone();
                         let mut cache_clone = dns_cache.clone();
                         let result = tauri::async_runtime::spawn_blocking(move || {
-                            let conns = monitor::network::sample_connections(&mut seen_clone, &mut cache_clone);
+                            let conns = monitor::network::sample_connections(
+                                &mut seen_clone,
+                                &mut cache_clone,
+                            );
                             (conns, seen_clone, cache_clone)
                         })
                         .await;
@@ -290,7 +447,11 @@ pub fn run() {
                             let (pb_url, pb_token, session_id) = {
                                 let cfg = config_bg.lock();
                                 let sess = session_bg.lock();
-                                (cfg.pb_url.clone(), cfg.pb_token.clone(), sess.session_id.clone())
+                                (
+                                    cfg.pb_url.clone(),
+                                    cfg.pb_token.clone(),
+                                    sess.session_id.clone(),
+                                )
                             };
 
                             if let Some(sid) = session_id {
@@ -357,16 +518,15 @@ pub fn run() {
             commands::get_user_activity,
             commands::get_user_network,
             commands::get_user_monthly_sessions,
+            commands::save_work_schedule,
+            commands::refresh_auth_state,
             commands::clear_auth,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
 }
 
-fn find_due_auto_break(
-    configs: &[BreakConfig],
-    history: &HashSet<String>,
-) -> Option<BreakConfig> {
+fn find_due_auto_break(configs: &[BreakConfig], history: &HashSet<String>) -> Option<BreakConfig> {
     let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60)?;
     let now_nepal = Utc::now().with_timezone(&nepal_offset);
     let now_time = NaiveTime::from_hms_opt(now_nepal.hour(), now_nepal.minute(), 0)?;
@@ -392,12 +552,66 @@ fn find_due_auto_break(
 }
 
 fn auto_break_history_key(config_id: &str) -> String {
-    let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60)
-        .expect("valid Nepal offset");
+    let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset");
     let now_nepal = Utc::now().with_timezone(&nepal_offset);
     format!("{}:{}", now_nepal.format("%Y-%m-%d"), config_id)
 }
 
 fn parse_hhmm(value: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(value, "%H:%M").ok()
+}
+
+fn nepal_offset() -> FixedOffset {
+    FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset")
+}
+
+fn schedule_datetime(date: chrono::NaiveDate, hhmm: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    let time = parse_hhmm(hhmm)?;
+    let naive = date.and_hms_opt(time.hour(), time.minute(), 0)?;
+    nepal_offset().from_local_datetime(&naive).single()
+}
+
+fn reminder_key(now: chrono::DateTime<FixedOffset>, kind: &str) -> String {
+    format!("{}:{}", now.format("%Y-%m-%d"), kind)
+}
+
+fn due_auto_breaks(configs: &[BreakConfig], history: &HashSet<String>) -> Vec<BreakConfig> {
+    let now_npt = Utc::now().with_timezone(&nepal_offset());
+    let now_time = NaiveTime::from_hms_opt(now_npt.hour(), now_npt.minute(), 0);
+    let Some(now_time) = now_time else {
+        return Vec::new();
+    };
+
+    let mut due: Vec<BreakConfig> = configs
+        .iter()
+        .filter(|config| config.auto_start_enabled)
+        .filter(|config| {
+            let key = auto_break_history_key(&config.id);
+            if history.contains(&key) {
+                return false;
+            }
+            let Some(start_time) = parse_hhmm(config.auto_start_time.as_deref().unwrap_or(""))
+            else {
+                return false;
+            };
+            let Some(end_time) = parse_hhmm(config.auto_end_time.as_deref().unwrap_or("")) else {
+                return false;
+            };
+            now_time >= start_time && now_time <= end_time
+        })
+        .cloned()
+        .collect();
+    due.sort_by_key(|config| config.sort_order);
+    due
+}
+
+fn find_pending_auto_break(
+    configs: &[BreakConfig],
+    pending: &HashSet<String>,
+) -> Option<BreakConfig> {
+    configs
+        .iter()
+        .filter(|config| pending.contains(&config.id))
+        .min_by_key(|config| config.sort_order)
+        .cloned()
 }
