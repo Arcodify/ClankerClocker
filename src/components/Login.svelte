@@ -38,7 +38,7 @@
         is_admin: boolean;
       }>("authenticate_pb", { pbUrl, pbEmail, pbPassword });
 
-      settings.update((s) => ({ ...s, pb_url: pbUrl, pb_email: pbEmail }));
+      settings.update((s) => ({ ...s, pb_url: pbUrl, pb_email: pbEmail, is_admin: result.is_admin }));
       authToken.set(result.token);
       userId.set(result.user_id);
       userName.set(result.user_name || result.user_email);

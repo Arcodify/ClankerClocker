@@ -244,28 +244,34 @@ pub fn run() {
                     if let Some(clock_out_due) =
                         schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_out_time)
                     {
-                        let key = reminder_key(now_npt, "clock_out");
-                        let should_handle = (status == SessionStatus::Active
+                        let past_due = (status == SessionStatus::Active
                             || status == SessionStatus::OnBreak)
-                            && now_npt >= clock_out_due
-                            && !scheduled_notification_history_bg.lock().contains(&key);
-                        if should_handle {
-                            scheduled_notification_history_bg.lock().insert(key);
-                            app_handle
-                                .emit(
-                                    "app-notification",
-                                    AppNotification {
-                                        title: "your clockout time is here".into(),
-                                        body: if config_snapshot.auto_clock_out_enabled {
-                                            "your clockout time is here. auto clocking out now."
-                                                .into()
-                                        } else {
-                                            "your clockout time is here".into()
-                                        },
-                                    },
-                                )
-                                .ok();
+                            && now_npt >= clock_out_due;
 
+                        if past_due {
+                            // Notification fires once per day (key-gated)
+                            let key = reminder_key(now_npt, "clock_out");
+                            if !scheduled_notification_history_bg.lock().contains(&key) {
+                                scheduled_notification_history_bg.lock().insert(key);
+                                app_handle
+                                    .emit(
+                                        "app-notification",
+                                        AppNotification {
+                                            title: "your clockout time is here".into(),
+                                            body: if config_snapshot.auto_clock_out_enabled {
+                                                "your clockout time is here. auto clocking out now."
+                                                    .into()
+                                            } else {
+                                                "your clockout time is here".into()
+                                            },
+                                        },
+                                    )
+                                    .ok();
+                            }
+
+                            // Auto clock-out retries every loop until it succeeds.
+                            // After success the session status becomes Idle so past_due
+                            // turns false and this block stops executing.
                             if config_snapshot.auto_clock_out_enabled {
                                 let _ = commands::clock_out_internal(
                                     &app_handle,

@@ -22,6 +22,8 @@
   let updateVersion: string | null = null;
   let updateInstalling = false;
   let updateDone = false;
+  let updateProgress = 0;
+  let updateStatus = "";
 
   $: isOffline = !$authToken;
   $: statusColor = $session.status === "active" ? "#22c55e" : $session.status === "on_break" ? "#f59e0b" : "#6b7280";
@@ -120,10 +122,10 @@
     }
   }
 
-  async function startBreak(breakType: string) {
+  async function startBreak(breakType: string, breakName: string) {
     showBreakMenu = false;
     try {
-      await invoke("start_break", { breakType });
+      await invoke("start_break", { breakType, breakName });
     } catch (e) {
       errorMessage.set(String(e));
     }
@@ -152,15 +154,41 @@
   async function installUpdate() {
     if (!updateVersion || updateInstalling) return;
     updateInstalling = true;
+    updateProgress = 0;
+    updateStatus = "Starting download...";
+    
     try {
       const update = await checkUpdate();
       if (update) {
-        await update.downloadAndInstall();
+        let downloaded = 0;
+        let total = 0;
+
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case "Started":
+              total = event.contentLength || 0;
+              updateStatus = "Downloading...";
+              break;
+            case "Progress":
+              downloaded += event.chunkLength;
+              if (total > 0) {
+                updateProgress = Math.round((downloaded / total) * 100);
+              }
+              break;
+            case "Finished":
+              updateStatus = "Installing...";
+              updateProgress = 100;
+              break;
+          }
+        });
+        
         updateDone = true;
         updateVersion = null;
+        updateStatus = "Update complete!";
       }
     } catch (e) {
       errorMessage.set("Update failed: " + String(e));
+      updateStatus = "Error updating";
     } finally {
       updateInstalling = false;
     }
@@ -198,7 +226,17 @@
   </header>
 
   {#if updateDone}
-    <div class="update-banner">Update installed — restart the app to apply.</div>
+    <div class="update-banner success">Update installed — restart the app to apply.</div>
+  {:else if updateInstalling}
+    <div class="update-banner">
+      <div class="update-info">
+        <span>{updateStatus}</span>
+        <span>{updateProgress}%</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" style="width: {updateProgress}%"></div>
+      </div>
+    </div>
   {/if}
 
   <div class="body">
@@ -236,7 +274,7 @@
             {#if showBreakMenu}
               <div class="break-menu">
                 {#each breakConfigs as bc}
-                  <button on:click={() => startBreak(bc.type_key)}>
+                  <button on:click={() => startBreak(bc.type_key, bc.name)}>
                     {breakIcon(bc.type_key)} {formatBreakLabel(bc)}
                   </button>
                 {/each}
@@ -395,7 +433,42 @@
   .icon-btn:hover { color: #c0c0d0; background: #1e1e2a; }
   .update-btn { color: #22c55e; }
   .update-btn:hover { color: #4ade80; background: #0f2a1a; }
-  .update-banner { margin: 0 12px; padding: 8px 12px; background: #0f2a1a; border: 1px solid #166534; border-radius: 8px; font-size: 11px; color: #4ade80; flex-shrink: 0; }
+  .update-banner {
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .update-banner.success {
+    background: #062016;
+    border-color: #065f46;
+    color: #34d399;
+    font-size: 11px;
+    padding: 8px 12px;
+  }
+  .update-info {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #94a3b8;
+    font-weight: 600;
+  }
+  .progress-bar {
+    height: 4px;
+    background: #1e293b;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: #3b82f6;
+    transition: width 0.3s ease;
+  }
 
   .badge {
     font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;

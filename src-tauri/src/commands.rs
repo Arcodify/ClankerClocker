@@ -628,7 +628,10 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         if !user.email.trim().is_empty() {
             cfg.user_email = user.email.trim().to_string();
         }
-        cfg.is_admin = user.is_admin;
+        // Only elevate to admin — never revoke via refresh since GET /users/:id
+        // may not return is_admin depending on PocketBase collection rules.
+        // Admin can only be cleared by signing out.
+        cfg.is_admin = cfg.is_admin || user.is_admin;
     }
 
     // Also sync company settings during auth refresh — drop lock before await

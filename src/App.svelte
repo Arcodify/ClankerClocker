@@ -1,54 +1,31 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { writable } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
   import {
     session, latestActivity, networkFeed, settings,
     authToken, userId, isAdmin, userName,
     errorMessage, view, elapsedSeconds,
     todayStats,
   } from "./lib/stores";
-  import type { SessionState, ActivitySnapshot, NetworkConnection, TodayStats } from "./lib/types";
+  import type { SessionState, ActivitySnapshot, NetworkConnection, AppNotification } from "./lib/types";
   import Login from "./components/Login.svelte";
   import Dashboard from "./components/Dashboard.svelte";
   import Settings from "./components/Settings.svelte";
   import AdminView from "./components/AdminView.svelte";
 
   let ticker: ReturnType<typeof setInterval>;
+  const notifications = writable<Array<{ id: string; title: string; body: string }>>([]);
 
-  onMount(async () => {
-    try {
-      const saved = await invoke<{
-        pb_url: string;
-        pb_email: string;
-        pb_token: string;
-        user_id: string;
-        user_name: string;
-        user_email: string;
-        token_saved_at: string;
-        default_pb_url: string;
-      }>("get_settings");
-
-      // Always restore URL and email so Login form is pre-filled
-      settings.update((s) => ({ ...s, pb_url: saved.pb_url, pb_email: saved.pb_email }));
-
-      if (saved.pb_token && saved.token_saved_at) {
-        const ageMs = Date.now() - new Date(saved.token_saved_at).getTime();
-        if (ageMs > 86_400_000) {
-          // Token older than 24 h — clear it and stay on login (email still pre-filled)
-          await invoke("clear_auth").catch(() => {});
-        } else {
-          authToken.set(saved.pb_token);
-          userId.set(saved.user_id);
-          userName.set(saved.user_name || saved.user_email);
-          view.set("dashboard");
-        }
-      }
-    } catch (_) {}
+  onMount(() => {
+    console.log("App mounted");
+    initialize().catch(err => console.error("Initialize failed:", err));
 
     // Restore running session from the Rust side (survives UI restarts)
-    try {
-      const state = await invoke<SessionState>("get_session_state");
+    invoke<SessionState>("get_session_state").then(state => {
+      console.log("Restored session:", state.status);
       session.set(state);
       if (state.status !== "idle" && state.clock_in) {
         const start = new Date(state.clock_in).getTime();
@@ -58,33 +35,121 @@
         startTicker();
         view.set("dashboard");
       }
-    } catch (_) {}
+    }).catch(err => console.warn("Failed to get session state:", err));
 
     // Real-time events from Rust daemon
-    await listen<SessionState>("session-update", (e) => {
-      session.set(e.payload);
-      if (e.payload.status === "idle") {
-        clearInterval(ticker);
-        elapsedSeconds.set(0);
-      } else if (e.payload.status === "active" && e.payload.clock_in) {
-        const start = new Date(e.payload.clock_in).getTime();
-        elapsedSeconds.set(
-          Math.floor((Date.now() - start) / 1000) - e.payload.total_break_seconds
-        );
-        startTicker();
-      }
-    });
+    const unlistens: Array<Promise<any>> = [
+      listen<SessionState>("session-update", (e) => {
+        session.set(e.payload);
+        if (e.payload.status === "idle") {
+          clearInterval(ticker);
+          elapsedSeconds.set(0);
+        } else if (e.payload.status === "active" && e.payload.clock_in) {
+          const start = new Date(e.payload.clock_in).getTime();
+          elapsedSeconds.set(
+            Math.floor((Date.now() - start) / 1000) - e.payload.total_break_seconds
+          );
+          startTicker();
+        }
+      }),
+      listen<ActivitySnapshot>("activity-update", (e) => {
+        latestActivity.set(e.payload);
+      }),
+      listen<NetworkConnection[]>("network-update", (e) => {
+        networkFeed.update((feed) => [...e.payload, ...feed].slice(0, 50));
+      }),
+      listen<AppNotification>("app-notification", async (e) => {
+        // System notification (best-effort — permission API may not be available)
+        try {
+          let permission = await isPermissionGranted();
+          if (!permission) {
+            const res = await requestPermission();
+            permission = res === "granted";
+          }
+          if (permission) {
+            sendNotification({ title: e.payload.title, body: e.payload.body });
+          }
+        } catch (_) {}
 
-    await listen<ActivitySnapshot>("activity-update", (e) => {
-      latestActivity.set(e.payload);
-    });
+        // In-app card always shows regardless of system notification result
+        const id = Math.random().toString(36).slice(2);
+        notifications.update((items) => [
+          { id, title: e.payload.title, body: e.payload.body },
+          ...items,
+        ].slice(0, 5));
+        setTimeout(() => {
+          notifications.update((items) => items.filter((item) => item.id !== id));
+        }, 6000);
+      })
+    ];
 
-    await listen<NetworkConnection[]>("network-update", (e) => {
-      networkFeed.update((feed) => [...e.payload, ...feed].slice(0, 50));
-    });
-
-    return () => clearInterval(ticker);
+    return () => {
+      clearInterval(ticker);
+      unlistens.forEach(p => p.catch(() => {}).then(u => u && u()));
+    };
   });
+
+  async function initialize() {
+    try {
+      console.log("Invoking get_settings...");
+      const saved = await invoke<any>("get_settings");
+      console.log("Settings loaded", !!saved.pb_token);
+
+      // Always restore connection and schedule data so the forms are pre-filled
+      settings.update((s) => ({
+        ...s,
+        pb_url: saved.pb_url || "",
+        pb_email: saved.pb_email || "",
+        is_admin: !!saved.is_admin,
+        clock_in_time: saved.clock_in_time || s.clock_in_time,
+        clock_out_time: saved.clock_out_time || s.clock_out_time,
+        auto_clock_out_enabled: saved.auto_clock_out_enabled !== false,
+      }));
+
+      if (saved.pb_token && saved.token_saved_at) {
+        const ageMs = Date.now() - new Date(saved.token_saved_at).getTime();
+        if (ageMs > 86_400_000) {
+          console.log("Token expired");
+          await invoke("clear_auth").catch(() => {});
+        } else {
+          authToken.set(saved.pb_token);
+          userId.set(saved.user_id);
+          userName.set(saved.user_name || saved.user_email);
+          isAdmin.set(!!saved.is_admin);
+          
+          view.set("dashboard");
+          refreshAuth().catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error("Initialize error:", err);
+    } finally {
+      setInterval(refreshAuth, 300_000);
+    }
+  }
+
+  async function refreshAuth() {
+    try {
+      const refreshed = await invoke<{
+        user_name: string;
+        user_email: string;
+        is_admin: boolean;
+        clock_in_time: string;
+        clock_out_time: string;
+        auto_clock_out_enabled: boolean;
+      }>("refresh_auth_state");
+      if (refreshed.user_name) userName.set(refreshed.user_name);
+      isAdmin.set(refreshed.is_admin);
+      settings.update((s) => ({
+        ...s,
+        is_admin: refreshed.is_admin,
+        pb_email: refreshed.user_email || s.pb_email,
+        clock_in_time: refreshed.clock_in_time || s.clock_in_time,
+        clock_out_time: refreshed.clock_out_time || s.clock_out_time,
+        auto_clock_out_enabled: refreshed.auto_clock_out_enabled,
+      }));
+    } catch (_) {}
+  }
 
   function startTicker() {
     clearInterval(ticker);
@@ -124,6 +189,15 @@
   {#if $errorMessage}
     <div class="error-toast">{$errorMessage}</div>
   {/if}
+
+  <div class="notification-stack">
+    {#each $notifications as note (note.id)}
+      <div class="notification-card">
+        <div class="notification-title">{note.title}</div>
+        <div class="notification-body">{note.body}</div>
+      </div>
+    {/each}
+  </div>
 </main>
 
 <style>
@@ -155,5 +229,45 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .notification-stack {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 110;
+    width: min(320px, calc(100vw - 28px));
+    pointer-events: none;
+  }
+
+  .notification-card {
+    background: rgba(10, 14, 24, 0.96);
+    border: 1px solid #2a3a55;
+    border-left: 3px solid #60a5fa;
+    border-radius: 12px;
+    padding: 10px 12px;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
+    animation: slideIn 0.18s ease-out;
+  }
+
+  .notification-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #dbeafe;
+    margin-bottom: 4px;
+  }
+
+  .notification-body {
+    font-size: 12px;
+    color: #bfdbfe;
+    line-height: 1.45;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 </style>

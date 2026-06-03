@@ -6,13 +6,22 @@ export const session = writable<SessionState>({
   session_id: null,
   clock_in: null,
   break_start: null,
+  break_name: null,
   total_break_seconds: 0,
   break_count: 0,
 });
 
 export const latestActivity = writable<ActivitySnapshot | null>(null);
 export const networkFeed = writable<NetworkConnection[]>([]);
-export const settings = writable<AppSettings>({ pb_url: "", pb_email: "", pb_password: "" });
+export const settings = writable<AppSettings>({
+  pb_url: "",
+  pb_email: "",
+  pb_password: "",
+  is_admin: false,
+  clock_in_time: "09:00",
+  clock_out_time: "18:00",
+  auto_clock_out_enabled: true,
+});
 export const authToken = writable<string>("");
 export const userId = writable<string>("");
 export const isAdmin = writable<boolean>(false);

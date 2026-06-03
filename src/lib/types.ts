@@ -5,6 +5,7 @@ export interface SessionState {
   session_id: string | null;
   clock_in: string | null;
   break_start: string | null;
+  break_name: string | null;
   total_break_seconds: number;
   break_count: number;
 }
@@ -51,6 +52,10 @@ export interface AppSettings {
   pb_url: string;
   pb_email: string;
   pb_password: string;
+  is_admin: boolean;
+  clock_in_time: string;
+  clock_out_time: string;
+  auto_clock_out_enabled: boolean;
 }
 
 export interface BreakConfig {
@@ -72,4 +77,9 @@ export interface LiveCounters {
   active_app: string;
   active_window: string;
   input_monitoring_active: boolean;
+}
+
+export interface AppNotification {
+  title: string;
+  body: string;
 }
