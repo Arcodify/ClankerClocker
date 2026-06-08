@@ -3,7 +3,7 @@ name = "clankerclocker"
 version = "0.2.2"
 description = "ClankerClocker - Employee Time & Activity Tracker"
 authors = ["scelester"]
-edition = "2026"
+edition = "2021"
 
 [lib]
 name = "clankerclocker_lib"
