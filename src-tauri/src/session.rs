@@ -152,6 +152,9 @@ pub struct TeamMember {
     pub total_break_seconds: i64,
     pub break_count: u32,
     pub active_app: String,
+    /// Totals across all of this member's sessions today (Nepal time), including the current one.
+    pub today_total_work_seconds: i64,
+    pub today_total_break_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

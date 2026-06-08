@@ -46,6 +46,8 @@ export interface TeamMember {
   total_break_seconds: number;
   break_count: number;
   active_app: string;
+  today_total_work_seconds: number;
+  today_total_break_seconds: number;
 }
 
 export interface AppSettings {

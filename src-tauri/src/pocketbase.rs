@@ -356,8 +356,23 @@ impl PocketBase {
 
     /// Get today's work stats for a given user.
     pub async fn get_today_stats(&self, user_id: &str) -> Result<TodayStats> {
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let filter = format!("user_id='{user_id}'&&clock_in>='{today} 00:00:00'");
+        // "Today" follows Nepal time (the company's operating timezone), not UTC —
+        // otherwise sessions started shortly after Nepal midnight (which is still
+        // daytime UTC-wise) would be counted as "yesterday".
+        use chrono::TimeZone;
+        let nepal_offset = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60)
+            .expect("valid Nepal offset");
+        let now_nepal = chrono::Utc::now().with_timezone(&nepal_offset);
+        let nepal_midnight = now_nepal.date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let boundary_utc = nepal_offset
+            .from_local_datetime(&nepal_midnight)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let filter = format!(
+            "user_id='{user_id}'&&clock_in>='{}'",
+            boundary_utc.format("%Y-%m-%d %H:%M:%S")
+        );
         let data = self.get_list("work_sessions", &filter, "").await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
 
@@ -507,6 +522,13 @@ impl PocketBase {
                 .await
                 .unwrap_or_default();
 
+            // Today's totals across all of this member's sessions (incl. the current one)
+            let (today_total_work_seconds, today_total_break_seconds) = self
+                .get_today_stats(&user_id)
+                .await
+                .map(|s| (s.total_work_seconds, s.total_break_seconds))
+                .unwrap_or((0, 0));
+
             members.push(TeamMember {
                 session_id,
                 user_id,
@@ -517,6 +539,8 @@ impl PocketBase {
                 total_break_seconds,
                 break_count,
                 active_app,
+                today_total_work_seconds,
+                today_total_break_seconds,
             });
         }
 

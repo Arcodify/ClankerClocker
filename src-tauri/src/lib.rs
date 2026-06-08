@@ -185,6 +185,8 @@ pub fn run() {
                 let mut snapshot_tick: u32 = 0;
                 let mut network_tick: u32 = 0;
                 let mut break_config_refresh_tick: u32 = 60;
+                const IDLE_WARNING_SECONDS: u64 = 4 * 60 + 30;
+                const IDLE_CLOCKOUT_SECONDS: u64 = 5 * 60;
 
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -214,10 +216,36 @@ pub fn run() {
                     let session_snapshot = session_bg.lock().clone();
                     let config_snapshot = config_bg.lock().clone();
                     let status = session_snapshot.status.clone();
+                    let session_id = session_snapshot.session_id.clone();
+                    let idle_seconds = counters_bg.lock().idle_seconds();
 
                     if status == SessionStatus::Idle {
                         auto_break_history_bg.lock().clear();
                         pending_auto_breaks_bg.lock().clear();
+                    }
+
+                    if let Some(sid) = session_id.as_ref() {
+                        let should_warn = (status == SessionStatus::Active
+                            || status == SessionStatus::OnBreak)
+                            && config_snapshot.auto_clock_out_enabled
+                            && idle_seconds >= IDLE_WARNING_SECONDS
+                            && idle_seconds < IDLE_CLOCKOUT_SECONDS;
+
+                        if should_warn {
+                            let key = format!("{}:idle_clockout_warning", sid);
+                            if !scheduled_notification_history_bg.lock().contains(&key) {
+                                scheduled_notification_history_bg.lock().insert(key);
+                                app_handle
+                                    .emit(
+                                        "app-notification",
+                                        AppNotification {
+                                            title: "clock-out warning".into(),
+                                            body: "You are about to be clocked out for inactivity. Move your mouse or press any key to stay clocked in.".into(),
+                                        },
+                                    )
+                                    .ok();
+                            }
+                        }
                     }
 
                     if let Some(clock_in_due) =
@@ -234,7 +262,7 @@ pub fn run() {
                                     "app-notification",
                                     AppNotification {
                                         title: "your clockin time is here".into(),
-                                        body: "your clockin time is here".into(),
+                                        body: "it's time to clock in for your shift".into(),
                                     },
                                 )
                                 .ok();

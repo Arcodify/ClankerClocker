@@ -239,6 +239,8 @@
             {#if member.total_break_seconds > 0}
               <div class="ms"><span class="msv">{formatDuration(member.total_break_seconds)}</span><span class="msl">break time</span></div>
             {/if}
+            <div class="ms"><span class="msv">{formatDuration(member.today_total_work_seconds)}</span><span class="msl">today total</span></div>
+            <div class="ms"><span class="msv">{formatDuration(member.today_total_break_seconds)}</span><span class="msl">today break</span></div>
           </div>
           {#if member.active_app}
             <div class="mapp"><span class="adot">▶</span>{member.active_app}</div>
@@ -265,6 +267,8 @@
     <!-- Summary row -->
     <div class="sum-row">
       <div class="sum-card"><span class="sumv">{elapsed(selected.clock_in)}</span><span class="suml">Elapsed</span></div>
+      <div class="sum-card"><span class="sumv">{formatDuration(selected.today_total_work_seconds)}</span><span class="suml">Total today</span></div>
+      <div class="sum-card"><span class="sumv">{formatDuration(selected.today_total_break_seconds)}</span><span class="suml">Break today</span></div>
       <div class="sum-card"><span class="sumv">{selected.break_count}</span><span class="suml">Breaks</span></div>
       <div class="sum-card"><span class="sumv">{totalKeys.toLocaleString()}</span><span class="suml">Keystrokes</span></div>
       <div class="sum-card"><span class="sumv">{totalClicks.toLocaleString()}</span><span class="suml">Clicks</span></div>

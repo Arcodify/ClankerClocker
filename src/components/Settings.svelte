@@ -103,29 +103,26 @@
       {#if saveOk}✓ Saved{:else if saving}Authenticating…{:else}Save & Login{/if}
     </button>
 
-    <div class="schedule-card">
-      <div class="schedule-title">Company Work Schedule</div>
-      {#if !$isAdmin}
-        <div class="policy-note">Managed by company administrator</div>
-      {/if}
-      <label>
-        <span>Clock In Time</span>
-        <input bind:value={clockInTime} placeholder="09:00" type="time" disabled={!$isAdmin} />
-      </label>
-      <label>
-        <span>Clock Out Time</span>
-        <input bind:value={clockOutTime} placeholder="18:00" type="time" disabled={!$isAdmin} />
-      </label>
-      <label class="switch-row">
-        <span>Auto clock out after clock-out time</span>
-        <input bind:checked={autoClockOutEnabled} type="checkbox" disabled={!$isAdmin} />
-      </label>
-      {#if $isAdmin}
+    {#if $isAdmin}
+      <div class="schedule-card">
+        <div class="schedule-title">Company Work Schedule</div>
+        <label>
+          <span>Clock In Time</span>
+          <input bind:value={clockInTime} placeholder="09:00" type="time" />
+        </label>
+        <label>
+          <span>Clock Out Time</span>
+          <input bind:value={clockOutTime} placeholder="18:00" type="time" />
+        </label>
+        <label class="switch-row">
+          <span>Auto clock out after clock-out time</span>
+          <input bind:checked={autoClockOutEnabled} type="checkbox" />
+        </label>
         <button class="btn-save btn-schedule" on:click={saveSchedule} disabled={savingSchedule}>
           {#if savingSchedule}Updating policy…{:else}Update Company Policy{/if}
         </button>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
     {#if $authToken}
       <div class="auth-row">
@@ -220,13 +217,6 @@
     text-transform: uppercase;
     letter-spacing: 0.7px;
     color: #7c8aa6;
-  }
-  .policy-note {
-    font-size: 10px;
-    color: #4b5563;
-    font-style: italic;
-    margin-top: -6px;
-    margin-bottom: 4px;
   }
   .switch-row {
     flex-direction: row;
