@@ -1,9 +1,9 @@
 [package]
 name = "clankerclocker"
-version = "0.2.0"
+version = "0.2.2"
 description = "ClankerClocker - Employee Time & Activity Tracker"
 authors = ["scelester"]
-edition = "2021"
+edition = "2026"
 
 [lib]
 name = "clankerclocker_lib"
