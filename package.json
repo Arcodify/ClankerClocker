@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "version:set": "node scripts/set-version.mjs",
     "install:macos:unsigned": "bash scripts/install-macos-unsigned.sh"
   },
   "dependencies": {
