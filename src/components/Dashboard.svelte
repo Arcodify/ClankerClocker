@@ -42,7 +42,7 @@
   $: monitoringWarningText = platformName === "windows"
     ? "Input monitoring looks inactive. Run the app as administrator and check whether antivirus is blocking the tray icon or input hooks."
     : platformName === "macos"
-      ? "Input monitoring looks inactive. Grant Accessibility in System Settings -> Privacy & Security -> Accessibility."
+      ? "Input monitoring looks inactive. Grant Accessibility and Input Monitoring in System Settings -> Privacy & Security."
       : "Input monitoring looks inactive. Run: sudo usermod -aG input $USER, then log out/in.";
 
   onMount(async () => {

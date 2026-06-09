@@ -240,7 +240,7 @@ pub async fn authenticate_pb(
         let cfg = state.config.lock();
         (cfg.clone(), cfg.token_saved_at.clone())
     };
-    
+
     state
         .db
         .lock()
@@ -580,7 +580,12 @@ pub async fn save_work_schedule(
         if let Ok(settings) = pb.get_company_settings().await {
             if let Some(id) = settings["id"].as_str() {
                 let _ = pb
-                    .update_company_settings(id, &clock_in_time, &clock_out_time, auto_clock_out_enabled)
+                    .update_company_settings(
+                        id,
+                        &clock_in_time,
+                        &clock_out_time,
+                        auto_clock_out_enabled,
+                    )
                     .await;
             }
         }

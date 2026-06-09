@@ -28,6 +28,7 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
 
         let counters_c = counters.clone();
         let flag_c = active_flag.clone();
+        let is_pointer_device = caps.contains(EventType::RELATIVE) || caps.contains(EventType::ABSOLUTE);
 
         std::thread::Builder::new()
             .name("input-dev".into())
@@ -46,7 +47,7 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                 got = true;
                                 match ev.kind() {
                                     InputEventKind::Key(key) if ev.value() == 1 => {
-                                        if (0x110u16..=0x117).contains(&key.code()) {
+                                        if is_pointer_device || is_mouse_button_code(key.code()) {
                                             mc += 1;
                                         } else {
                                             ks += 1;
@@ -88,6 +89,12 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
     active_flag.store(spawned > 0, Ordering::Relaxed);
 }
 
+#[cfg(target_os = "linux")]
+fn is_mouse_button_code(code: u16) -> bool {
+    // BTN_MOUSE through BTN_TASK cover standard mouse buttons and extras.
+    (0x110u16..=0x117).contains(&code)
+}
+
 // ── macOS / Windows: rdev (uses platform APIs) ───────────────────────────────
 
 #[cfg(not(target_os = "linux"))]
@@ -103,34 +110,33 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
 
                 if let Err(e) = listen(move |event: Event| {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if let Some(mut c) = counters_ref.try_lock() {
-                            c.last_activity = Some(std::time::Instant::now());
-                            match event.event_type {
-                                EventType::KeyPress(_) => {
-                                    c.keystrokes += 1;
-                                    active_flag_ref.store(true, Ordering::Relaxed);
-                                }
-                                EventType::ButtonPress(_) => {
-                                    c.mouse_clicks += 1;
-                                    active_flag_ref.store(true, Ordering::Relaxed);
-                                }
-                                EventType::MouseMove { x, y } => {
-                                    if x.is_finite() && y.is_finite() {
-                                        if c.last_mouse_x != 0.0 || c.last_mouse_y != 0.0 {
-                                            let dx = x - c.last_mouse_x;
-                                            let dy = y - c.last_mouse_y;
-                                            let dist = (dx * dx + dy * dy).sqrt();
-                                            if dist.is_finite() && dist < 5000.0 {
-                                                c.mouse_distance_px += dist;
-                                            }
-                                        }
-                                        c.last_mouse_x = x;
-                                        c.last_mouse_y = y;
-                                        active_flag_ref.store(true, Ordering::Relaxed);
-                                    }
-                                }
-                                _ => {}
+                        let mut c = counters_ref.lock();
+                        c.last_activity = Some(std::time::Instant::now());
+                        match event.event_type {
+                            EventType::KeyPress(_) => {
+                                c.keystrokes += 1;
+                                active_flag_ref.store(true, Ordering::Relaxed);
                             }
+                            EventType::ButtonPress(_) => {
+                                c.mouse_clicks += 1;
+                                active_flag_ref.store(true, Ordering::Relaxed);
+                            }
+                            EventType::MouseMove { x, y } => {
+                                if x.is_finite() && y.is_finite() {
+                                    if c.last_mouse_x != 0.0 || c.last_mouse_y != 0.0 {
+                                        let dx = x - c.last_mouse_x;
+                                        let dy = y - c.last_mouse_y;
+                                        let dist = (dx * dx + dy * dy).sqrt();
+                                        if dist.is_finite() && dist < 5000.0 {
+                                            c.mouse_distance_px += dist;
+                                        }
+                                    }
+                                    c.last_mouse_x = x;
+                                    c.last_mouse_y = y;
+                                    active_flag_ref.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            _ => {}
                         }
                     }));
                 }) {

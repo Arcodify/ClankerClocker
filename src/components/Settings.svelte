@@ -139,7 +139,7 @@
   <div class="info">
     <div class="info-title">Platform Notes For End Users</div>
     <div class="notes">
-      <p><strong>macOS:</strong> needs Accessibility permission granted in System Settings → Privacy &amp; Security → Accessibility</p>
+      <p><strong>macOS:</strong> needs Accessibility and Input Monitoring permission granted in System Settings → Privacy &amp; Security</p>
       <p><strong>Windows:</strong> run as administrator if the tray icon or input hooks get blocked by antivirus</p>
       <p><strong>Linux:</strong> user must be in the input group (<code>sudo usermod -aG input $USER</code>, then log out/in)</p>
     </div>

@@ -170,7 +170,9 @@ impl PocketBase {
     pub async fn get_company_settings(&self) -> Result<Value> {
         // Fetch the first record from the 'company_config' collection
         let data = self.get_list("company_config", "", "&perPage=1").await?;
-        let items = data["items"].as_array().ok_or_else(|| anyhow!("Invalid response"))?;
+        let items = data["items"]
+            .as_array()
+            .ok_or_else(|| anyhow!("Invalid response"))?;
         if items.is_empty() {
             return Err(anyhow!("No company settings found"));
         }
@@ -360,8 +362,8 @@ impl PocketBase {
         // otherwise sessions started shortly after Nepal midnight (which is still
         // daytime UTC-wise) would be counted as "yesterday".
         use chrono::TimeZone;
-        let nepal_offset = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60)
-            .expect("valid Nepal offset");
+        let nepal_offset =
+            chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset");
         let now_nepal = chrono::Utc::now().with_timezone(&nepal_offset);
         let nepal_midnight = now_nepal.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let boundary_utc = nepal_offset

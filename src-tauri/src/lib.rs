@@ -29,6 +29,7 @@ pub struct AppState {
     pub counters: Arc<Mutex<ActivityCounters>>,
     pub config: Arc<Mutex<AppConfig>>,
     pub input_monitoring: Arc<AtomicBool>,
+    pub active_window: Arc<Mutex<(String, String)>>,
     pub db: Arc<Mutex<LocalDb>>,
     pub break_id: Arc<Mutex<Option<String>>>,
     pub break_configs: Arc<Mutex<Vec<BreakConfig>>>,
@@ -67,6 +68,7 @@ pub fn run() {
             let pending_auto_breaks: Arc<Mutex<HashSet<String>>> =
                 Arc::new(Mutex::new(HashSet::new()));
             let input_monitoring = Arc::new(AtomicBool::new(false));
+            let active_window = Arc::new(Mutex::new((String::new(), String::new())));
 
             // System tray
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -155,6 +157,7 @@ pub fn run() {
                 counters: counters.clone(),
                 config: config.clone(),
                 input_monitoring: input_monitoring.clone(),
+                active_window: active_window.clone(),
                 db: db.clone(),
                 break_id: break_id.clone(),
                 break_configs: break_configs.clone(),
@@ -165,6 +168,8 @@ pub fn run() {
 
             // Start input monitor thread (rdev blocks its OS thread)
             monitor::input::start(counters.clone(), input_monitoring.clone());
+            #[cfg(target_os = "linux")]
+            monitor::window::start_hyprland_active_window_cache(active_window.clone());
 
             // Main background loop: live counters, snapshots, network
             let app_handle = app.handle().clone();
@@ -178,6 +183,7 @@ pub fn run() {
             let scheduled_notification_history_bg = scheduled_notification_history.clone();
             let pending_auto_breaks_bg = pending_auto_breaks.clone();
             let input_monitoring_bg = input_monitoring.clone();
+            let active_window_bg = active_window.clone();
 
             tauri::async_runtime::spawn(async move {
                 let mut net_seen: HashSet<String> = HashSet::new();
@@ -225,8 +231,7 @@ pub fn run() {
                     }
 
                     if let Some(sid) = session_id.as_ref() {
-                        let should_warn = (status == SessionStatus::Active
-                            || status == SessionStatus::OnBreak)
+                        let should_warn = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
                             && idle_seconds >= IDLE_WARNING_SECONDS
                             && idle_seconds < IDLE_CLOCKOUT_SECONDS;
@@ -245,6 +250,35 @@ pub fn run() {
                                     )
                                     .ok();
                             }
+                        }
+
+                        let should_idle_clockout = status == SessionStatus::Active
+                            && config_snapshot.auto_clock_out_enabled
+                            && idle_seconds >= IDLE_CLOCKOUT_SECONDS;
+
+                        if should_idle_clockout {
+                            let key = format!("{}:idle_clockout", sid);
+                            if !scheduled_notification_history_bg.lock().contains(&key) {
+                                scheduled_notification_history_bg.lock().insert(key);
+                                app_handle
+                                    .emit(
+                                        "app-notification",
+                                        AppNotification {
+                                            title: "auto clocked out for idle".into(),
+                                            body: "You were clocked out automatically after 5 minutes of inactivity.".into(),
+                                        },
+                                    )
+                                    .ok();
+                            }
+
+                            let _ = commands::clock_out_internal(
+                                &app_handle,
+                                &session_bg,
+                                &counters_bg,
+                                &config_bg,
+                                &break_id_bg,
+                            )
+                            .await;
                         }
                     }
 
@@ -390,11 +424,17 @@ pub fn run() {
                         }
                     }
 
-                    // Active window poll every 5s
-                    let (active_app, active_window) =
-                        tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
-                            .await
-                            .unwrap_or_default();
+                    // Prefer the compositor event cache; fall back to a fresh poll if empty.
+                    let (active_app, active_window) = {
+                        let cached = active_window_bg.lock().clone();
+                        if !cached.0.is_empty() || !cached.1.is_empty() {
+                            cached
+                        } else {
+                            tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
+                                .await
+                                .unwrap_or_default()
+                        }
+                    };
 
                     // Emit live counters every 5s without draining
                     {
