@@ -593,6 +593,7 @@ pub fn run() {
             commands::get_user_activity,
             commands::get_user_network,
             commands::get_user_monthly_sessions,
+            commands::get_user_today_breakdown,
             commands::save_work_schedule,
             commands::refresh_auth_state,
             commands::clear_auth,

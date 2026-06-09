@@ -1,8 +1,13 @@
 <script lang="ts">
-  import { createEventDispatcher, onMount, onDestroy } from "svelte";
+  import { createEventDispatcher, onMount, onDestroy, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { teamStatus, errorMessage, formatDuration } from "../lib/stores";
-  import type { TeamMember, ActivitySnapshot, NetworkConnection } from "../lib/types";
+  import type {
+    TeamMember,
+    ActivitySnapshot,
+    NetworkConnection,
+    TodayBreakdown,
+  } from "../lib/types";
 
   const dispatch = createEventDispatcher();
   let loading = true;
@@ -13,10 +18,18 @@
   let snapshots: ActivitySnapshot[] = [];
   let netConns: NetworkConnection[] = [];
   let detailLoading = false;
+  let activityReady = false;
+  let networkReady = false;
+  let activityLoading = false;
+  let networkLoading = false;
+  let selectedSeq = 0;
   let netFilter = "";
   let netPage = 0;
   const NET_PAGE_SIZE = 10;
-  let activeTab: "activity" | "network" | "calendar" = "activity";
+  let breakdown: TodayBreakdown | null = null;
+  let breakdownReady = false;
+  let breakdownLoading = false;
+  let activeTab: "activity" | "network" | "breakdown" | "calendar" = "activity";
 
   // Calendar state
   let calYear = new Date().getFullYear();
@@ -47,21 +60,81 @@
   }
 
   async function selectMember(m: TeamMember) {
+    const sessionId = m.session_id;
     selected = m;
-    snapshots = []; netConns = [];
-    detailLoading = true; activeTab = "activity";
+    snapshots = [];
+    netConns = [];
+    detailLoading = true;
+    activityReady = false;
+    networkReady = false;
+    breakdownReady = false;
+    activityLoading = true;
+    networkLoading = false;
+    breakdownLoading = false;
+    activeTab = "activity";
+    const seq = ++selectedSeq;
+    await tick();
     try {
-      const [snaps, nets] = await Promise.all([
-        invoke<ActivitySnapshot[]>("get_user_activity", { sessionId: m.session_id }),
-        invoke<NetworkConnection[]>("get_user_network", { sessionId: m.session_id }),
-      ]);
+      const snaps = await invoke<ActivitySnapshot[]>("get_user_activity", { sessionId });
+      if (selectedSeq !== seq || selected?.session_id !== sessionId) return;
       snapshots = snaps;
-      netConns = nets;
     } catch (_) {}
+    activityLoading = false;
     detailLoading = false;
+    activityReady = true;
+    networkReady = false;
   }
 
-  function back() { selected = null; snapshots = []; netConns = []; }
+  async function loadNetwork() {
+    if (!selected || networkLoading || networkReady) return;
+    const seq = selectedSeq;
+    const sessionId = selected.session_id;
+    networkLoading = true;
+    try {
+      const nets = await invoke<NetworkConnection[]>("get_user_network", { sessionId });
+      if (selectedSeq !== seq || !selected || selected.session_id !== sessionId) return;
+      netConns = nets;
+    } catch (_) {
+      netConns = [];
+    } finally {
+      if (selectedSeq === seq) {
+        networkLoading = false;
+        networkReady = true;
+      }
+    }
+  }
+
+  async function loadBreakdown() {
+    if (!selected || breakdownLoading || breakdownReady) return;
+    const seq = selectedSeq;
+    const userId = selected.user_id;
+    breakdownLoading = true;
+    try {
+      const data = await invoke<TodayBreakdown>("get_user_today_breakdown", { userId });
+      if (selectedSeq !== seq || !selected || selected.user_id !== userId) return;
+      breakdown = data;
+    } catch (_) {
+      breakdown = null;
+    } finally {
+      if (selectedSeq === seq) {
+        breakdownLoading = false;
+        breakdownReady = true;
+      }
+    }
+  }
+
+  function back() {
+    selectedSeq++;
+    selected = null;
+    snapshots = [];
+    netConns = [];
+    activityReady = false;
+    networkReady = false;
+    breakdownReady = false;
+    activityLoading = false;
+    networkLoading = false;
+    breakdownLoading = false;
+  }
 
   async function loadCalendar() {
     if (!selected) return;
@@ -77,6 +150,8 @@
   }
 
   $: if (activeTab === "calendar") loadCalendar();
+  $: if (selected && activeTab === "network" && !networkReady && !networkLoading) loadNetwork();
+  $: if (selected && activeTab === "breakdown" && !breakdownReady && !breakdownLoading) loadBreakdown();
 
   function prevMonth() {
     if (calMonth === 0) { calMonth = 11; calYear--; } else calMonth--;
@@ -266,7 +341,7 @@
   <div class="body">
     <!-- Summary row -->
     <div class="sum-row">
-      <div class="sum-card"><span class="sumv">{elapsed(selected.clock_in)}</span><span class="suml">Elapsed</span></div>
+      <div class="sum-card"><span class="sumv">{elapsed(selected.clock_in)}</span><span class="suml">Session Age</span></div>
       <div class="sum-card"><span class="sumv">{formatDuration(selected.today_total_work_seconds)}</span><span class="suml">Total today</span></div>
       <div class="sum-card"><span class="sumv">{formatDuration(selected.today_total_break_seconds)}</span><span class="suml">Break today</span></div>
       <div class="sum-card"><span class="sumv">{selected.break_count}</span><span class="suml">Breaks</span></div>
@@ -281,6 +356,7 @@
       <button class="tab" class:active={activeTab === "network"} on:click={() => (activeTab = "network")}>
         Network {#if netConns.length > 0}<span class="tc">{netConns.length}</span>{/if}
       </button>
+      <button class="tab" class:active={activeTab === "breakdown"} on:click={() => (activeTab = "breakdown")}>Breakdown</button>
       <button class="tab" class:active={activeTab === "calendar"} on:click={() => (activeTab = "calendar")}>Calendar</button>
     </div>
 
@@ -301,7 +377,9 @@
             </button>
           {/if}
         </div>
-        {#if snapshots.length === 0}
+        {#if !activityReady}
+          <div class="nodata">Loading activity…</div>
+        {:else if snapshots.length === 0}
           <div class="nodata">No activity snapshots yet for this session.</div>
         {:else}
           <div class="chart-wrap">
@@ -357,6 +435,11 @@
     <!-- ─── NETWORK TAB ─── -->
     {:else if activeTab === "network"}
 
+      {#if !networkReady}
+        <div class="card">
+          <div class="nodata">Loading network log…</div>
+        </div>
+      {:else}
       {#if domainGroups.length > 0}
         <div class="card">
           <div class="card-title">Top Domains <span class="csub">{domainGroups.length} unique</span></div>
@@ -407,6 +490,39 @@
           </div>
         {/if}
       </div>
+      {/if}
+
+    <!-- ─── BREAKDOWN TAB ─── -->
+    {:else if activeTab === "breakdown"}
+
+      {#if breakdownLoading}
+        <div class="placeholder">Loading breakdown…</div>
+      {:else if !breakdown}
+        <div class="card"><div class="nodata">No breakdown available.</div></div>
+      {:else}
+        <div class="card">
+          <div class="card-title">Today Breakdown <span class="csub">{breakdown.session_count} session(s)</span></div>
+          {#if breakdown.sessions.length === 0}
+            <div class="nodata">No sessions found for today.</div>
+          {:else}
+            <div class="break-list">
+              {#each breakdown.sessions as row}
+                <div class="break-row" class:bad-net={row.net_seconds < 0}>
+                  <div class="break-main">
+                    <span class="break-time">{fmtTime(row.clock_in)}{#if row.clock_out} - {fmtTime(row.clock_out)}{/if}</span>
+                    <span class="break-id" title={row.session_id}>{row.session_id}</span>
+                  </div>
+                  <div class="break-stats">
+                    <span><b>Gross</b> {formatDuration(row.gross_seconds)}</span>
+                    <span><b>Break</b> {formatDuration(row.break_seconds)}</span>
+                    <span><b>Net</b> {formatDuration(row.net_seconds)}</span>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
 
     <!-- ─── CALENDAR TAB ─── -->
     {:else}
@@ -564,6 +680,17 @@
   .nproc { color: #7878a0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nhost { color: #a0a0bc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nport { color: #3a3a52; font-variant-numeric: tabular-nums; }
+
+  /* ── Breakdown ── */
+  .break-list { display: flex; flex-direction: column; gap: 8px; }
+  .break-row { background: #0e0e16; border: 1px solid #1a1a24; border-radius: 8px; padding: 10px 12px; }
+  .break-row.bad-net { border-color: #7f1d1d; background: #1a1111; }
+  .break-main { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+  .break-time { font-size: 12px; font-weight: 600; color: #d8d8ec; }
+  .break-id { font-size: 10px; color: #4a4a62; text-align: right; word-break: break-all; }
+  .break-stats { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 11px; color: #7b7b96; }
+  .break-stats b { color: #d8d8ec; font-weight: 600; }
+
   /* ── Calendar ── */
   .cal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .cal-month { font-size: 13px; font-weight: 700; color: #c0c0d0; }

@@ -1,5 +1,83 @@
 /// <reference path="../pb_data/types.d.ts" />
 
+function parseDateTime(value) {
+    if (!value) {
+        return null;
+    }
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function findSessionRecord(sessionId) {
+    try {
+        return $app.findFirstRecordByFilter("work_sessions", `id = '${sessionId}'`);
+    } catch (e) {
+        return null;
+    }
+}
+
+function validateBreakRequest(e) {
+    const sessionId = e.record.getString("session_id");
+    if (!sessionId) {
+        throw new BadRequestError("session_id is required");
+    }
+
+    const session = findSessionRecord(sessionId);
+    if (!session) {
+        throw new BadRequestError("Invalid session_id");
+    }
+
+    const start = parseDateTime(e.record.getString("start_time"));
+    if (!start) {
+        throw new BadRequestError("Invalid break start time");
+    }
+
+    const endRaw = e.record.getString("end_time");
+    const end = parseDateTime(endRaw);
+    const clockIn = parseDateTime(session.getString("clock_in"));
+    const clockOut = parseDateTime(session.getString("clock_out"));
+
+    if (clockIn && start < clockIn) {
+        throw new BadRequestError("Break cannot start before session clock-in");
+    }
+    if (clockOut && start > clockOut) {
+        throw new BadRequestError("Break cannot start after session clock-out");
+    }
+    if (endRaw) {
+        if (!end) {
+            throw new BadRequestError("Invalid break end time");
+        }
+        if (end < start) {
+            throw new BadRequestError("Break cannot end before it starts");
+        }
+        if (clockOut && end > clockOut) {
+            throw new BadRequestError("Break cannot end after session clock-out");
+        }
+    } else {
+        let openBreaks = [];
+        try {
+            openBreaks = $app.findRecordsByFilter(
+                "breaks",
+                `session_id = '${sessionId}' && end_time = ''`,
+                "",
+                200,
+                0
+            );
+        } catch (err) {
+            throw new BadRequestError("Unable to validate open breaks");
+        }
+        const otherOpen = openBreaks.filter((b) => b.id !== e.record.id);
+        if (otherOpen.length > 0) {
+            throw new BadRequestError("Session already has an open break");
+        }
+    }
+
+    return e.next();
+}
+
+onRecordCreateRequest(validateBreakRequest, "breaks");
+onRecordUpdateRequest(validateBreakRequest, "breaks");
+
 // Runs every minute. Closes any active/on_break session when:
 //   - the app has stopped reporting (offline) for 5+ minutes, or
 //   - the latest snapshot shows 5+ minutes of idle time, or
@@ -9,6 +87,40 @@
 cronAdd("auto_clockout_offline", "* * * * *", () => {
     const OFFLINE_THRESHOLD_SECONDS = 5 * 60; // 5 minutes
     const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // company runs on Nepal time (UTC+5:45)
+
+    function closeOpenBreaks(sessionId, endTime) {
+        let closedSeconds = 0;
+        let openBreaks = [];
+        try {
+            openBreaks = $app.findRecordsByFilter(
+                "breaks",
+                `session_id = '${sessionId}' && end_time = ''`,
+                "",
+                200,
+                0
+            );
+        } catch (e) {
+            console.error(`[auto_clockout] failed to fetch open breaks for ${sessionId}:`, e);
+            return 0;
+        }
+
+        for (const breakRecord of openBreaks) {
+            const start = parseDateTime(breakRecord.getString("start_time"));
+            if (!start) {
+                continue;
+            }
+            const secs = Math.max(0, Math.floor((endTime - start) / 1000));
+            closedSeconds += secs;
+            breakRecord.set("end_time", endTime.toISOString());
+            try {
+                $app.save(breakRecord);
+            } catch (e) {
+                console.error(`[auto_clockout] failed to close break ${breakRecord.id}:`, e);
+            }
+        }
+
+        return closedSeconds;
+    }
 
     const now = new Date();
     const nepalNow = new Date(now.getTime() + NEPAL_OFFSET_MS);
@@ -116,7 +228,7 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             }
 
             // Auto clock-out: set clock_out to now and mark completed
-            const breakSecs = session.getInt("total_break_seconds") || 0;
+            const breakSecs = (session.getInt("total_break_seconds") || 0) + closeOpenBreaks(sessionId, now);
             session.set("clock_out", now.toISOString());
             session.set("status", "completed");
             session.set("total_break_seconds", breakSecs);

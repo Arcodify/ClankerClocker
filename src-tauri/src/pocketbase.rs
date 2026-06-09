@@ -1,7 +1,9 @@
 use crate::session::{
-    ActivitySnapshot, BreakConfig, NetworkConnection, SessionStatus, TeamMember, TodayStats,
+    ActivitySnapshot, BreakConfig, NetworkConnection, SessionStatus, TeamMember, TodayBreakdown,
+    TodaySessionBreakdown, TodayStats,
 };
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,6 +52,7 @@ pub struct PbUserRecord {
     pub auto_clock_out_enabled: bool,
 }
 
+#[derive(Clone)]
 pub struct PocketBase {
     pub base_url: String,
     pub token: String,
@@ -209,7 +212,9 @@ impl PocketBase {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
         let filter = format!("user_id='{user_id}'&&(status='active'||status='on_break')");
-        let data = self.get_list("work_sessions", &filter, "").await?;
+        let data = self
+            .get_list("work_sessions", &filter, "&sort=clock_in")
+            .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
         for item in &items {
             let id = item["id"].as_str().unwrap_or("");
@@ -298,6 +303,34 @@ impl PocketBase {
             .await
     }
 
+    pub async fn close_open_breaks(
+        &self,
+        session_id: &str,
+        end: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64> {
+        let filter = format!("session_id='{session_id}'&&end_time=''");
+        let data = self.get_list("breaks", &filter, "").await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        let mut closed_seconds = 0i64;
+
+        for item in items {
+            let break_id = item["id"].as_str().unwrap_or("");
+            let start_time = item["start_time"].as_str().unwrap_or("");
+            let Some(start) = Self::parse_pb_datetime(start_time) else {
+                continue;
+            };
+            if break_id.is_empty() {
+                continue;
+            }
+
+            let secs = (end.signed_duration_since(start)).num_seconds().max(0);
+            closed_seconds += secs;
+            self.end_break(break_id, end).await?;
+        }
+
+        Ok(closed_seconds)
+    }
+
     pub async fn push_snapshot(&self, session_id: &str, snap: &ActivitySnapshot) -> Result<()> {
         self.post(
             "activity_snapshots",
@@ -356,8 +389,18 @@ impl PocketBase {
         Ok(resp.json::<Value>().await?)
     }
 
+    fn parse_pb_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        if value.is_empty() {
+            return None;
+        }
+        chrono::DateTime::parse_from_rfc3339(value)
+            .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.3fZ"))
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc))
+    }
+
     /// Get today's work stats for a given user.
-    pub async fn get_today_stats(&self, user_id: &str) -> Result<TodayStats> {
+    async fn get_today_breakdown_data(&self, user_id: &str) -> Result<TodayBreakdown> {
         // "Today" follows Nepal time (the company's operating timezone), not UTC —
         // otherwise sessions started shortly after Nepal midnight (which is still
         // daytime UTC-wise) would be counted as "yesterday".
@@ -381,37 +424,37 @@ impl PocketBase {
         let session_count = items.len() as u32;
         let mut total_work_seconds = 0i64;
         let mut session_ids: Vec<String> = Vec::new();
+        let mut session_summaries: Vec<TodaySessionBreakdown> = Vec::new();
 
         for item in &items {
-            session_ids.push(item["id"].as_str().unwrap_or("").to_string());
+            let session_id = item["id"].as_str().unwrap_or("").to_string();
+            session_ids.push(session_id.clone());
             let clock_in = item["clock_in"].as_str().unwrap_or("");
             let clock_out = item["clock_out"].as_str().unwrap_or("");
-            let total_break = item["total_break_seconds"].as_i64().unwrap_or(0);
-
-            if !clock_in.is_empty() {
-                let start = chrono::DateTime::parse_from_rfc3339(clock_in)
-                    .or_else(|_| {
-                        chrono::DateTime::parse_from_str(clock_in, "%Y-%m-%d %H:%M:%S%.3fZ")
-                    })
-                    .map(|d| d.with_timezone(&chrono::Utc));
-                let end = if clock_out.is_empty() {
-                    Ok(chrono::Utc::now())
-                } else {
-                    chrono::DateTime::parse_from_rfc3339(clock_out)
-                        .or_else(|_| {
-                            chrono::DateTime::parse_from_str(clock_out, "%Y-%m-%d %H:%M:%S%.3fZ")
-                        })
-                        .map(|d| d.with_timezone(&chrono::Utc))
-                };
-                if let (Ok(s), Ok(e)) = (start, end) {
-                    total_work_seconds += (e - s).num_seconds() - total_break;
-                }
-            }
+            let start = Self::parse_pb_datetime(clock_in);
+            let end = if clock_out.is_empty() {
+                Some(chrono::Utc::now())
+            } else {
+                Self::parse_pb_datetime(clock_out)
+            };
+            let gross_seconds = match (start, end) {
+                (Some(s), Some(e)) => (e - s).num_seconds(),
+                _ => 0,
+            };
+            session_summaries.push(TodaySessionBreakdown {
+                session_id,
+                clock_in: start.unwrap_or_else(chrono::Utc::now),
+                clock_out: end,
+                gross_seconds,
+                break_seconds: 0,
+                net_seconds: gross_seconds,
+            });
         }
 
         // Count breaks across all today's sessions
         let mut break_count = 0u32;
         let mut total_break_seconds = 0i64;
+        let mut break_seconds_by_session: HashMap<String, i64> = HashMap::new();
         if !session_ids.is_empty() {
             let ids_filter = session_ids
                 .iter()
@@ -424,23 +467,60 @@ impl PocketBase {
                 for b in &bitems {
                     let bs = b["start_time"].as_str().unwrap_or("");
                     let be = b["end_time"].as_str().unwrap_or("");
-                    if !bs.is_empty() && !be.is_empty() {
-                        let s = chrono::DateTime::parse_from_rfc3339(bs).ok();
-                        let e = chrono::DateTime::parse_from_rfc3339(be).ok();
+                    let session_id = b["session_id"].as_str().unwrap_or("").to_string();
+                    if !bs.is_empty() {
+                        let s = Self::parse_pb_datetime(bs);
+                        let e = if be.is_empty() {
+                            Some(chrono::Utc::now())
+                        } else {
+                            Self::parse_pb_datetime(be)
+                        };
                         if let (Some(s), Some(e)) = (s, e) {
-                            total_break_seconds += (e - s).num_seconds();
+                            let secs = (e - s).num_seconds().max(0);
+                            total_break_seconds += secs;
+                            *break_seconds_by_session.entry(session_id).or_insert(0) += secs;
                         }
                     }
                 }
             }
         }
 
-        Ok(TodayStats {
+        for summary in &mut session_summaries {
+            let session_break = break_seconds_by_session
+                .get(&summary.session_id)
+                .copied()
+                .unwrap_or(0);
+            summary.break_seconds = session_break;
+            summary.net_seconds = summary.gross_seconds - session_break;
+            total_work_seconds += summary.net_seconds;
+        }
+
+        if total_work_seconds < 0 {
+            total_work_seconds = 0;
+        }
+
+        Ok(TodayBreakdown {
             session_count,
             total_work_seconds,
             break_count,
             total_break_seconds,
+            sessions: session_summaries,
         })
+    }
+
+    pub async fn get_today_stats(&self, user_id: &str) -> Result<TodayStats> {
+        let data = self.get_today_breakdown_data(user_id).await?;
+
+        Ok(TodayStats {
+            session_count: data.session_count,
+            total_work_seconds: data.total_work_seconds,
+            break_count: data.break_count,
+            total_break_seconds: data.total_break_seconds,
+        })
+    }
+
+    pub async fn get_today_breakdown(&self, user_id: &str) -> Result<TodayBreakdown> {
+        self.get_today_breakdown_data(user_id).await
     }
 
     pub async fn get_break_configs(&self) -> Result<Vec<BreakConfig>> {
@@ -476,10 +556,12 @@ impl PocketBase {
         let data = self.get_list("work_sessions", filter, "").await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
 
-        let mut members = Vec::new();
-        for item in &items {
-            let session_id = item["id"].as_str().unwrap_or("").to_string();
-            let user_id = item["user_id"].as_str().unwrap_or("").to_string();
+        let mut tasks = tokio::task::JoinSet::new();
+        for (idx, item) in items.into_iter().enumerate() {
+            let pb = self.clone();
+            tasks.spawn(async move {
+                let session_id = item["id"].as_str().unwrap_or("").to_string();
+                let user_id = item["user_id"].as_str().unwrap_or("").to_string();
             let status_str = item["status"].as_str().unwrap_or("idle");
             let status = match status_str {
                 "active" => SessionStatus::Active,
@@ -488,10 +570,16 @@ impl PocketBase {
             };
 
             // Read name/email stored on session at clock-in (avoids cross-user PB access rules)
-            let mut user_name = item["user_name"].as_str().unwrap_or("").to_string();
-            let mut user_email = item["user_email"].as_str().unwrap_or("").to_string();
+                let mut user_name = item["user_name"].as_str().unwrap_or("").to_string();
+                let mut user_email = item["user_email"].as_str().unwrap_or("").to_string();
 
-            if let Ok(user) = self.get_user_record(&user_id).await {
+                let user_fut = pb.get_user_record(&user_id);
+                let active_app_fut = pb.get_latest_active_app(&session_id);
+                let today_stats_fut = pb.get_today_stats(&user_id);
+                let (user_res, active_app_res, today_res) =
+                    tokio::join!(user_fut, active_app_fut, today_stats_fut);
+
+                if let Ok(user) = user_res {
                 if !user.email.is_empty() {
                     user_email = user.email;
                 }
@@ -500,50 +588,46 @@ impl PocketBase {
                 }
             }
 
-            if user_name.is_empty() && !user_email.is_empty() {
-                user_name = user_email.split('@').next().unwrap_or("").to_string();
-            }
-            if user_email.is_empty() {
-                user_email = user_id.clone();
-            }
+                if user_name.is_empty() && !user_email.is_empty() {
+                    user_name = user_email.split('@').next().unwrap_or("").to_string();
+                }
+                if user_email.is_empty() {
+                    user_email = user_id.clone();
+                }
 
-            let clock_in_str = item["clock_in"].as_str().unwrap_or("");
-            let clock_in = chrono::DateTime::parse_from_rfc3339(clock_in_str)
-                .or_else(|_| {
-                    chrono::DateTime::parse_from_str(clock_in_str, "%Y-%m-%d %H:%M:%S%.3fZ")
-                })
-                .map(|d| d.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
+                let clock_in_str = item["clock_in"].as_str().unwrap_or("");
+                let clock_in = Self::parse_pb_datetime(clock_in_str).unwrap_or_else(chrono::Utc::now);
 
-            let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
-            let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
+                let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
+                let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
+                let active_app = active_app_res.unwrap_or_default();
+                let (today_total_work_seconds, today_total_break_seconds) = today_res
+                    .map(|s| (s.total_work_seconds, s.total_break_seconds))
+                    .unwrap_or((0, 0));
 
-            // Get last known active app from latest snapshot
-            let active_app = self
-                .get_latest_active_app(&session_id)
-                .await
-                .unwrap_or_default();
-
-            // Today's totals across all of this member's sessions (incl. the current one)
-            let (today_total_work_seconds, today_total_break_seconds) = self
-                .get_today_stats(&user_id)
-                .await
-                .map(|s| (s.total_work_seconds, s.total_break_seconds))
-                .unwrap_or((0, 0));
-
-            members.push(TeamMember {
-                session_id,
-                user_id,
-                user_name,
-                user_email,
-                status,
-                clock_in,
-                total_break_seconds,
-                break_count,
-                active_app,
-                today_total_work_seconds,
-                today_total_break_seconds,
+                (
+                    idx,
+                    TeamMember {
+                        session_id,
+                        user_id,
+                        user_name,
+                        user_email,
+                        status,
+                        clock_in,
+                        total_break_seconds,
+                        break_count,
+                        active_app,
+                        today_total_work_seconds,
+                        today_total_break_seconds,
+                    },
+                )
             });
+        }
+
+        let mut members = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            let (_, member) = result.map_err(|e| anyhow!("team status task failed: {e}"))?;
+            members.push(member);
         }
 
         Ok(members)

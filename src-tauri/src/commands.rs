@@ -2,7 +2,7 @@ use crate::config::DEFAULT_PB_URL;
 use crate::pocketbase::PocketBase;
 use crate::session::{
     ActivityCounters, ActivitySnapshot, AppNotification, BreakConfig, NetworkConnection,
-    SessionState, SessionStatus, TeamMember, TodayStats,
+    SessionState, SessionStatus, TeamMember, TodayBreakdown, TodayStats,
 };
 use crate::AppState;
 use chrono::Utc;
@@ -176,6 +176,11 @@ pub async fn clock_out_internal(
 
     if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
         let pb = PocketBase::new(pb_url, pb_token);
+        let extra_break_seconds = pb
+            .close_open_breaks(&session_id, &now)
+            .await
+            .unwrap_or(0);
+        let total_break_seconds = total_break_seconds + extra_break_seconds;
         pb.close_session(&session_id, &now, total_break_seconds)
             .await
             .map_err(|e| e.to_string())?;
@@ -410,6 +415,24 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
 
     let pb = PocketBase::new(pb_url, pb_token);
     pb.get_today_stats(&user_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_user_today_breakdown(
+    state: State<'_, AppState>,
+    user_id: String,
+) -> Result<TodayBreakdown, String> {
+    let (pb_url, pb_token) = {
+        let cfg = state.config.lock();
+        (cfg.pb_url.clone(), cfg.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let pb = PocketBase::new(pb_url, pb_token);
+    pb.get_today_breakdown(&user_id)
         .await
         .map_err(|e| e.to_string())
 }

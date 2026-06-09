@@ -142,6 +142,25 @@ pub struct TodayStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodaySessionBreakdown {
+    pub session_id: String,
+    pub clock_in: DateTime<Utc>,
+    pub clock_out: Option<DateTime<Utc>>,
+    pub gross_seconds: i64,
+    pub break_seconds: i64,
+    pub net_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodayBreakdown {
+    pub session_count: u32,
+    pub total_work_seconds: i64,
+    pub break_count: u32,
+    pub total_break_seconds: i64,
+    pub sessions: Vec<TodaySessionBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMember {
     pub session_id: String,
     pub user_id: String,

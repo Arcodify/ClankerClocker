@@ -36,6 +36,23 @@ export interface TodayStats {
   total_break_seconds: number;
 }
 
+export interface TodaySessionBreakdown {
+  session_id: string;
+  clock_in: string;
+  clock_out: string | null;
+  gross_seconds: number;
+  break_seconds: number;
+  net_seconds: number;
+}
+
+export interface TodayBreakdown {
+  session_count: number;
+  total_work_seconds: number;
+  break_count: number;
+  total_break_seconds: number;
+  sessions: TodaySessionBreakdown[];
+}
+
 export interface TeamMember {
   session_id: string;
   user_id: string;
