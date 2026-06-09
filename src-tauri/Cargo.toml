@@ -1,6 +1,6 @@
 [package]
 name = "clankerclocker"
-version = "0.2.3"
+version = "0.2.5"
 description = "ClankerClocker - Employee Time & Activity Tracker"
 authors = ["scelester"]
 edition = "2021"
