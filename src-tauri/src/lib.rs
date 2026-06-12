@@ -232,6 +232,14 @@ pub fn run() {
                     }
 
                     if let Some(sid) = session_id.as_ref() {
+                        // Once the user is active again, forget this episode's idle
+                        // notifications so the next idle stretch warns again.
+                        if idle_seconds < debug.idle_warning_seconds {
+                            let mut history = scheduled_notification_history_bg.lock();
+                            history.remove(&format!("{}:idle_clockout_warning", sid));
+                            history.remove(&format!("{}:idle_clockout", sid));
+                        }
+
                         let should_warn = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
                             && idle_seconds >= debug.idle_warning_seconds
