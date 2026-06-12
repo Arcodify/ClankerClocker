@@ -12,7 +12,6 @@ function findSessionRecord(sessionId) {
     try {
         return $app.findFirstRecordByFilter("work_sessions", `id = '${sessionId}'`);
     } catch (e) {
-        return null;
     }
 }
 
