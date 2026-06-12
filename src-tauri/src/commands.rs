@@ -724,6 +724,7 @@ fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
     let payload = AppNotification {
         title: title.to_string(),
         body: body.to_string(),
+        kind: "info".to_string(),
     };
     app.emit("app-notification", payload).ok();
 }

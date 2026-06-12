@@ -213,4 +213,8 @@ impl Default for AppConfig {
 pub struct AppNotification {
     pub title: String,
     pub body: String,
+    /// Discriminator the frontend uses to pick a notification sound, e.g.
+    /// "clock_in_reminder", "idle_clockout_warning", "idle_clockout",
+    /// "scheduled_clockout_warning", "scheduled_clockout", "info".
+    pub kind: String,
 }

@@ -101,4 +101,5 @@ export interface LiveCounters {
 export interface AppNotification {
   title: string;
   body: string;
+  kind: string;
 }

@@ -19,6 +19,79 @@
   let ticker: ReturnType<typeof setInterval>;
   const notifications = writable<Array<{ id: string; title: string; body: string }>>([]);
 
+  let audioCtx: AudioContext | null = null;
+
+  function getAudioContext(): AudioContext | null {
+    try {
+      if (!audioCtx) {
+        audioCtx = new AudioContext();
+      }
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume().catch(() => {});
+      }
+      return audioCtx;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function playTone(ctx: AudioContext, freq: number, startTime: number, duration: number, gain = 0.18) {
+    const osc = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gainNode.gain.setValueAtTime(0, startTime);
+    gainNode.gain.linearRampToValueAtTime(gain, startTime + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    osc.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.02);
+  }
+
+  // Each reminder gets its own short, subtle melody so they're recognizable
+  // by ear without looking at the screen.
+  function playNotificationSound(kind: string) {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    switch (kind) {
+      case "clock_in_reminder":
+        // gentle ascending chime — time to start your day
+        [523.25, 659.25, 783.99].forEach((freq, i) =>
+          playTone(ctx, freq, now + i * 0.15, 0.35, 0.16)
+        );
+        break;
+      case "idle_clockout_warning":
+        // quick repeated beeps — heads up, you're about to be clocked out
+        [880, 880, 880].forEach((freq, i) =>
+          playTone(ctx, freq, now + i * 0.18, 0.12, 0.2)
+        );
+        break;
+      case "idle_clockout":
+        // descending two-tone — you've been clocked out for inactivity
+        [440, 277.18].forEach((freq, i) =>
+          playTone(ctx, freq, now + i * 0.18, 0.4, 0.18)
+        );
+        break;
+      case "scheduled_clockout_warning":
+        // two-tone heads up, distinct from the idle warning
+        [659.25, 523.25].forEach((freq, i) =>
+          playTone(ctx, freq, now + i * 0.16, 0.25, 0.18)
+        );
+        break;
+      case "scheduled_clockout":
+        // descending triad — your work day is done
+        [523.25, 392.0, 261.63].forEach((freq, i) =>
+          playTone(ctx, freq, now + i * 0.18, 0.4, 0.16)
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
   onMount(() => {
     console.log("App mounted");
     initialize().catch(err => console.error("Initialize failed:", err));
@@ -59,6 +132,8 @@
         networkFeed.update((feed) => [...e.payload, ...feed].slice(0, 50));
       }),
       listen<AppNotification>("app-notification", async (e) => {
+        playNotificationSound(e.payload.kind);
+
         // System notification (best-effort — permission API may not be available)
         try {
           let permission = await isPermissionGranted();

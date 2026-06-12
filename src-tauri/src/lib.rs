@@ -16,7 +16,7 @@ use tauri::{
     Emitter, Manager,
 };
 
-use chrono::{FixedOffset, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, FixedOffset, NaiveTime, TimeZone, Timelike, Utc};
 use db::LocalDb;
 use pocketbase::PocketBase;
 use session::{
@@ -191,8 +191,8 @@ pub fn run() {
                 let mut snapshot_tick: u32 = 0;
                 let mut network_tick: u32 = 0;
                 let mut break_config_refresh_tick: u32 = 60;
-                const IDLE_WARNING_SECONDS: u64 = 4 * 60 + 30;
-                const IDLE_CLOCKOUT_SECONDS: u64 = 5 * 60;
+                let mut scheduled_clockout_warned_at: Option<DateTime<Utc>> = None;
+                let debug = DebugOverrides::load();
 
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -220,7 +220,8 @@ pub fn run() {
                     let now = Utc::now();
                     let now_npt = now.with_timezone(&nepal_offset());
                     let session_snapshot = session_bg.lock().clone();
-                    let config_snapshot = config_bg.lock().clone();
+                    let mut config_snapshot = config_bg.lock().clone();
+                    debug.apply_to_config(&mut config_snapshot);
                     let status = session_snapshot.status.clone();
                     let session_id = session_snapshot.session_id.clone();
                     let idle_seconds = counters_bg.lock().idle_seconds();
@@ -233,8 +234,8 @@ pub fn run() {
                     if let Some(sid) = session_id.as_ref() {
                         let should_warn = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
-                            && idle_seconds >= IDLE_WARNING_SECONDS
-                            && idle_seconds < IDLE_CLOCKOUT_SECONDS;
+                            && idle_seconds >= debug.idle_warning_seconds
+                            && idle_seconds < debug.idle_clockout_seconds;
 
                         if should_warn {
                             let key = format!("{}:idle_clockout_warning", sid);
@@ -246,6 +247,7 @@ pub fn run() {
                                         AppNotification {
                                             title: "clock-out warning".into(),
                                             body: "You are about to be clocked out for inactivity. Move your mouse or press any key to stay clocked in.".into(),
+                                            kind: "idle_clockout_warning".into(),
                                         },
                                     )
                                     .ok();
@@ -254,7 +256,7 @@ pub fn run() {
 
                         let should_idle_clockout = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
-                            && idle_seconds >= IDLE_CLOCKOUT_SECONDS;
+                            && idle_seconds >= debug.idle_clockout_seconds;
 
                         if should_idle_clockout {
                             let key = format!("{}:idle_clockout", sid);
@@ -266,6 +268,7 @@ pub fn run() {
                                         AppNotification {
                                             title: "auto clocked out for idle".into(),
                                             body: "You were clocked out automatically after 5 minutes of inactivity.".into(),
+                                            kind: "idle_clockout".into(),
                                         },
                                     )
                                     .ok();
@@ -286,8 +289,12 @@ pub fn run() {
                         schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_in_time)
                     {
                         let key = reminder_key(now_npt, "clock_in");
+                        // Only fire within a short window right at clock-in time, not
+                        // any time afterwards — otherwise an app restart later in the
+                        // day (which resets the in-memory history) would re-send it.
                         let should_notify = status == SessionStatus::Idle
                             && now_npt >= clock_in_due
+                            && now_npt < clock_in_due + chrono::Duration::minutes(2)
                             && !scheduled_notification_history_bg.lock().contains(&key);
                         if should_notify {
                             scheduled_notification_history_bg.lock().insert(key);
@@ -297,6 +304,7 @@ pub fn run() {
                                     AppNotification {
                                         title: "your clockin time is here".into(),
                                         body: "it's time to clock in for your shift".into(),
+                                        kind: "clock_in_reminder".into(),
                                     },
                                 )
                                 .ok();
@@ -311,43 +319,69 @@ pub fn run() {
                             && now_npt >= clock_out_due;
 
                         if past_due {
-                            // Notification fires once per day (key-gated)
+                            // Warning notification fires once per day (key-gated)
                             let key = reminder_key(now_npt, "clock_out");
                             if !scheduled_notification_history_bg.lock().contains(&key) {
                                 scheduled_notification_history_bg.lock().insert(key);
+                                scheduled_clockout_warned_at = Some(now);
                                 app_handle
                                     .emit(
                                         "app-notification",
                                         AppNotification {
                                             title: "your clockout time is here".into(),
                                             body: if config_snapshot.auto_clock_out_enabled {
-                                                "your clockout time is here. auto clocking out now."
+                                                "your clockout time is here. you'll be auto clocked out shortly."
                                                     .into()
                                             } else {
                                                 "your clockout time is here".into()
                                             },
+                                            kind: "scheduled_clockout_warning".into(),
                                         },
                                     )
                                     .ok();
                             }
 
-                            // Auto clock-out retries every loop until it succeeds.
-                            // After success the session status becomes Idle so past_due
-                            // turns false and this block stops executing.
+                            // Auto clock-out only happens after the warning notification
+                            // (+ sound) above has had a moment to be seen/heard, and
+                            // retries every loop until it succeeds. After success the
+                            // session status becomes Idle so past_due turns false and
+                            // this block stops executing.
                             if config_snapshot.auto_clock_out_enabled {
-                                let _ = commands::clock_out_internal(
-                                    &app_handle,
-                                    &session_bg,
-                                    &counters_bg,
-                                    &config_bg,
-                                    &break_id_bg,
-                                )
-                                .await;
+                                let grace_elapsed = scheduled_clockout_warned_at
+                                    .map(|warned_at| {
+                                        (now - warned_at).num_seconds()
+                                            >= debug.clockout_grace_seconds
+                                    })
+                                    .unwrap_or(true);
+
+                                if grace_elapsed {
+                                    app_handle
+                                        .emit(
+                                            "app-notification",
+                                            AppNotification {
+                                                title: "auto clocked out".into(),
+                                                body: "your scheduled clock-out time passed. you've been clocked out automatically.".into(),
+                                                kind: "scheduled_clockout".into(),
+                                            },
+                                        )
+                                        .ok();
+
+                                    let _ = commands::clock_out_internal(
+                                        &app_handle,
+                                        &session_bg,
+                                        &counters_bg,
+                                        &config_bg,
+                                        &break_id_bg,
+                                    )
+                                    .await;
+                                    scheduled_clockout_warned_at = None;
+                                }
                             }
                         }
                     }
 
-                    let configs = break_configs_bg.lock().clone();
+                    let mut configs = break_configs_bg.lock().clone();
+                    debug.inject_break_config(&mut configs);
                     let history = auto_break_history_bg.lock().clone();
                     let pending = pending_auto_breaks_bg.lock().clone();
 
@@ -372,7 +406,7 @@ pub fn run() {
                         } else {
                             let due = due_auto_breaks(&configs, &history);
                             if let Some(config) = due.first() {
-                                if commands::start_break_internal(
+                                let result = commands::start_break_internal(
                                     &app_handle,
                                     &session_bg,
                                     &config_bg,
@@ -380,9 +414,8 @@ pub fn run() {
                                     &config.type_key,
                                     Some(&config.name),
                                 )
-                                .await
-                                .is_ok()
-                                {
+                                .await;
+                                if result.is_ok() {
                                     auto_break_history_bg
                                         .lock()
                                         .insert(auto_break_history_key(&config.id));
@@ -411,6 +444,7 @@ pub fn run() {
                                                 AppNotification {
                                                     title: format!("your break {name} is ending"),
                                                     body: format!("your break {name} is ending"),
+                                                    kind: "info".into(),
                                                 },
                                             )
                                             .ok();
@@ -645,9 +679,8 @@ fn due_auto_breaks(configs: &[BreakConfig], history: &HashSet<String>) -> Vec<Br
             else {
                 return false;
             };
-            let Some(end_time) = parse_hhmm(config.auto_end_time.as_deref().unwrap_or("")) else {
-                return false;
-            };
+            let end_time = parse_hhmm(config.auto_end_time.as_deref().unwrap_or(""))
+                .unwrap_or(start_time);
             now_time >= start_time && now_time <= end_time
         })
         .cloned()
@@ -665,4 +698,95 @@ fn find_pending_auto_break(
         .filter(|config| pending.contains(&config.id))
         .min_by_key(|config| config.sort_order)
         .cloned()
+}
+
+/// Local-testing-only overrides, read from env vars so the scheduling loop
+/// can be exercised in seconds instead of waiting for real clock-in,
+/// clock-out, break, or idle thresholds. Only active in debug builds
+/// (`npm run tauri dev`) — release builds always use the defaults below and
+/// never read these env vars, so this has zero effect for end users.
+///
+/// - `CLANKER_DEBUG_CLOCK_IN_TIME` / `CLANKER_DEBUG_CLOCK_OUT_TIME` (HH:MM, NPT)
+/// - `CLANKER_DEBUG_AUTO_CLOCKOUT=1` forces auto clock-out on
+/// - `CLANKER_DEBUG_IDLE_WARNING_SECONDS` / `CLANKER_DEBUG_IDLE_CLOCKOUT_SECONDS`
+/// - `CLANKER_DEBUG_CLOCKOUT_GRACE_SECONDS`
+/// - `CLANKER_DEBUG_BREAK_AT` (HH:MM, NPT) adds a synthetic auto-start break
+#[derive(Debug)]
+struct DebugOverrides {
+    clock_in_time: Option<String>,
+    clock_out_time: Option<String>,
+    force_auto_clockout: bool,
+    idle_warning_seconds: u64,
+    idle_clockout_seconds: u64,
+    clockout_grace_seconds: i64,
+    break_at: Option<String>,
+}
+
+impl DebugOverrides {
+    #[cfg(debug_assertions)]
+    fn load() -> Self {
+        fn env_num<T: std::str::FromStr>(key: &str, default: T) -> T {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        }
+        let overrides = DebugOverrides {
+            clock_in_time: std::env::var("CLANKER_DEBUG_CLOCK_IN_TIME").ok(),
+            clock_out_time: std::env::var("CLANKER_DEBUG_CLOCK_OUT_TIME").ok(),
+            force_auto_clockout: std::env::var("CLANKER_DEBUG_AUTO_CLOCKOUT").is_ok(),
+            idle_warning_seconds: env_num("CLANKER_DEBUG_IDLE_WARNING_SECONDS", 4 * 60 + 30),
+            idle_clockout_seconds: env_num("CLANKER_DEBUG_IDLE_CLOCKOUT_SECONDS", 5 * 60),
+            clockout_grace_seconds: env_num("CLANKER_DEBUG_CLOCKOUT_GRACE_SECONDS", 20),
+            break_at: std::env::var("CLANKER_DEBUG_BREAK_AT").ok(),
+        };
+        if overrides.clock_in_time.is_some()
+            || overrides.clock_out_time.is_some()
+            || overrides.force_auto_clockout
+            || overrides.break_at.is_some()
+        {
+            log::info!("[debug] schedule overrides active: {overrides:?}");
+        }
+        overrides
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn load() -> Self {
+        DebugOverrides {
+            clock_in_time: None,
+            clock_out_time: None,
+            force_auto_clockout: false,
+            idle_warning_seconds: 4 * 60 + 30,
+            idle_clockout_seconds: 5 * 60,
+            clockout_grace_seconds: 20,
+            break_at: None,
+        }
+    }
+
+    fn apply_to_config(&self, config: &mut AppConfig) {
+        if let Some(t) = &self.clock_in_time {
+            config.clock_in_time = t.clone();
+        }
+        if let Some(t) = &self.clock_out_time {
+            config.clock_out_time = t.clone();
+        }
+        if self.force_auto_clockout {
+            config.auto_clock_out_enabled = true;
+        }
+    }
+
+    fn inject_break_config(&self, configs: &mut Vec<BreakConfig>) {
+        if let Some(hhmm) = &self.break_at {
+            configs.push(BreakConfig {
+                id: "debug-break".into(),
+                name: "Debug Break".into(),
+                type_key: "debug".into(),
+                duration_minutes: 1,
+                sort_order: 99,
+                auto_start_enabled: true,
+                auto_start_time: Some(hhmm.clone()),
+                auto_end_time: None,
+            });
+        }
+    }
 }
