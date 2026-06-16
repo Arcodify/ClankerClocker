@@ -103,3 +103,74 @@ export interface AppNotification {
   body: string;
   kind: string;
 }
+
+export interface UserInfo {
+  id: string;
+  name: string;
+  email: string;
+  is_admin: boolean;
+}
+
+export interface SessionRecord {
+  session_id: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  clock_in: string;
+  clock_out: string | null;
+  status: string;
+  gross_seconds: number;
+  break_seconds: number;
+  net_seconds: number;
+  break_count: number;
+}
+
+export interface UserSummary {
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  session_count: number;
+  days_present: number;
+  total_work_seconds: number;
+  total_break_seconds: number;
+  total_gross_seconds: number;
+}
+
+export interface NetworkStat {
+  name: string;
+  count: number;
+}
+
+export interface NetworkRecord {
+  timestamp: string;
+  user_id: string;
+  user_name: string;
+  user_email: string;
+  session_id: string;
+  process_name: string;
+  remote_host: string;
+  remote_ip: string;
+  remote_port: number;
+  local_port: number;
+}
+
+export interface NetworkReport {
+  records: NetworkRecord[];
+  top_hosts: NetworkStat[];
+  top_processes: NetworkStat[];
+}
+
+export interface AppUsage {
+  app: string;
+  seconds: number;
+  pct: number;
+}
+
+export interface ActivityReport {
+  total_keystrokes: number;
+  total_clicks: number;
+  idle_pct: number;
+  top_apps: AppUsage[];
+  session_count: number;
+  total_snapshot_count: number;
+}

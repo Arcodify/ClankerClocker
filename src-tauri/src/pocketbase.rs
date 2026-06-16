@@ -726,26 +726,33 @@ impl PocketBase {
     }
 
     pub async fn get_all_users(&self) -> Result<Vec<crate::session::UserInfo>> {
-        let data = self.get_list("users", "", "&sort=name&perPage=200").await?;
+        // The users collection list rule restricts non-superadmin tokens to their own
+        // record. Derive the full user list from work_sessions instead, which has
+        // permissive read rules for authenticated admins.
+        let data = self
+            .get_list("work_sessions", "", "&sort=-clock_in&perPage=500")
+            .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
-        Ok(items
+        let mut seen = std::collections::HashSet::new();
+        let mut users: Vec<crate::session::UserInfo> = items
             .iter()
-            .map(|item| {
-                let raw_name = item["name"].as_str().unwrap_or("").trim().to_string();
-                let email = item["email"].as_str().unwrap_or("").to_string();
+            .filter_map(|item| {
+                let id = item["user_id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    return None;
+                }
+                let email = item["user_email"].as_str().unwrap_or("").to_string();
+                let raw_name = item["user_name"].as_str().unwrap_or("").trim().to_string();
                 let name = if raw_name.is_empty() {
                     email.split('@').next().unwrap_or("").to_string()
                 } else {
                     raw_name
                 };
-                crate::session::UserInfo {
-                    id: item["id"].as_str().unwrap_or("").to_string(),
-                    name,
-                    email,
-                    is_admin: item["is_admin"].as_bool().unwrap_or(false),
-                }
+                Some(crate::session::UserInfo { id, name, email, is_admin: false })
             })
-            .collect())
+            .collect();
+        users.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(users)
     }
 
     pub async fn get_sessions_in_range(
