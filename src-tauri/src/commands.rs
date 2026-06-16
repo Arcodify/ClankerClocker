@@ -1,14 +1,40 @@
 use crate::config::DEFAULT_PB_URL;
 use crate::pocketbase::PocketBase;
 use crate::session::{
-    ActivityCounters, ActivitySnapshot, AppNotification, BreakConfig, NetworkConnection,
-    SessionState, SessionStatus, TeamMember, TodayBreakdown, TodayStats,
+    ActivityCounters, ActivityReport, ActivitySnapshot, AppNotification, BreakConfig,
+    NetworkConnection, NetworkReport, SessionRecord, SessionState, SessionStatus, TeamMember,
+    TodayBreakdown, TodayStats, UserInfo, UserSummary,
 };
 use crate::AppState;
 use chrono::Utc;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use tauri::{Emitter, State};
 use uuid::Uuid;
+
+fn nepal_range_from_dates(
+    from_date: &str,
+    to_date: &str,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    use chrono::TimeZone;
+    let nepal = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).unwrap();
+    let now_npl = chrono::Utc::now().with_timezone(&nepal);
+    let from = chrono::NaiveDate::parse_from_str(from_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| now_npl.date_naive());
+    let to = chrono::NaiveDate::parse_from_str(to_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| now_npl.date_naive());
+    let from_utc = nepal
+        .from_local_datetime(&from.and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    let to_utc = nepal
+        .from_local_datetime(&to.and_hms_opt(23, 59, 59).unwrap())
+        .single()
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    (from_utc, to_utc)
+}
 
 pub async fn start_break_internal(
     app: &tauri::AppHandle,
@@ -730,6 +756,141 @@ pub async fn clear_auth(state: State<'_, AppState>) -> Result<(), String> {
     }
     let cfg = state.config.lock().clone();
     state.db.lock().save_config(&cfg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_all_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>, String> {
+    let (pb_url, pb_token) = {
+        let c = state.config.lock();
+        (c.pb_url.clone(), c.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    PocketBase::new(pb_url, pb_token)
+        .get_all_users()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_sessions_report(
+    state: State<'_, AppState>,
+    from_date: String,
+    to_date: String,
+    user_id: Option<String>,
+) -> Result<Vec<SessionRecord>, String> {
+    let (pb_url, pb_token) = {
+        let c = state.config.lock();
+        (c.pb_url.clone(), c.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let (from, to) = nepal_range_from_dates(&from_date, &to_date);
+    PocketBase::new(pb_url, pb_token)
+        .get_sessions_in_range(&from, &to, user_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_time_summary(
+    state: State<'_, AppState>,
+    from_date: String,
+    to_date: String,
+    user_id: Option<String>,
+) -> Result<Vec<UserSummary>, String> {
+    let (pb_url, pb_token) = {
+        let c = state.config.lock();
+        (c.pb_url.clone(), c.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let (from, to) = nepal_range_from_dates(&from_date, &to_date);
+    let sessions = PocketBase::new(pb_url, pb_token)
+        .get_sessions_in_range(&from, &to, user_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let nepal = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).unwrap();
+    let mut by_user: HashMap<String, UserSummary> = HashMap::new();
+    let mut user_days: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for s in &sessions {
+        let e = by_user.entry(s.user_id.clone()).or_insert_with(|| UserSummary {
+            user_id: s.user_id.clone(),
+            user_name: s.user_name.clone(),
+            user_email: s.user_email.clone(),
+            session_count: 0,
+            days_present: 0,
+            total_work_seconds: 0,
+            total_break_seconds: 0,
+            total_gross_seconds: 0,
+        });
+        e.session_count += 1;
+        e.total_work_seconds += s.net_seconds;
+        e.total_break_seconds += s.break_seconds;
+        e.total_gross_seconds += s.gross_seconds;
+        let date = s
+            .clock_in
+            .with_timezone(&nepal)
+            .format("%Y-%m-%d")
+            .to_string();
+        user_days.entry(s.user_id.clone()).or_default().insert(date);
+    }
+    for (uid, summary) in by_user.iter_mut() {
+        summary.days_present = user_days.get(uid).map(|d| d.len() as u32).unwrap_or(0);
+    }
+    let mut result: Vec<UserSummary> = by_user.into_values().collect();
+    result.sort_by(|a, b| a.user_name.cmp(&b.user_name));
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_network_report(
+    state: State<'_, AppState>,
+    from_date: String,
+    to_date: String,
+    user_id: Option<String>,
+) -> Result<NetworkReport, String> {
+    let (pb_url, pb_token) = {
+        let c = state.config.lock();
+        (c.pb_url.clone(), c.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let (from, to) = nepal_range_from_dates(&from_date, &to_date);
+    PocketBase::new(pb_url, pb_token)
+        .get_network_in_range(&from, &to, user_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_activity_report(
+    state: State<'_, AppState>,
+    from_date: String,
+    to_date: String,
+    user_id: String,
+) -> Result<ActivityReport, String> {
+    let (pb_url, pb_token) = {
+        let c = state.config.lock();
+        (c.pb_url.clone(), c.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    if user_id.is_empty() {
+        return Err("user_id required for activity report".into());
+    }
+    let (from, to) = nepal_range_from_dates(&from_date, &to_date);
+    PocketBase::new(pb_url, pb_token)
+        .get_activity_in_range(&from, &to, &user_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn notify(app: &tauri::AppHandle, title: &str, body: &str) {

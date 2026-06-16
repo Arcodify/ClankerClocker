@@ -725,6 +725,296 @@ impl PocketBase {
         Ok(conns)
     }
 
+    pub async fn get_all_users(&self) -> Result<Vec<crate::session::UserInfo>> {
+        let data = self.get_list("users", "", "&sort=name&perPage=200").await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        Ok(items
+            .iter()
+            .map(|item| {
+                let raw_name = item["name"].as_str().unwrap_or("").trim().to_string();
+                let email = item["email"].as_str().unwrap_or("").to_string();
+                let name = if raw_name.is_empty() {
+                    email.split('@').next().unwrap_or("").to_string()
+                } else {
+                    raw_name
+                };
+                crate::session::UserInfo {
+                    id: item["id"].as_str().unwrap_or("").to_string(),
+                    name,
+                    email,
+                    is_admin: item["is_admin"].as_bool().unwrap_or(false),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn get_sessions_in_range(
+        &self,
+        from: &chrono::DateTime<chrono::Utc>,
+        to: &chrono::DateTime<chrono::Utc>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::session::SessionRecord>> {
+        let mut filter = format!(
+            "clock_in>='{}'&&clock_in<='{}'",
+            from.format("%Y-%m-%d %H:%M:%S"),
+            to.format("%Y-%m-%d %H:%M:%S"),
+        );
+        if let Some(uid) = user_id {
+            if !uid.is_empty() {
+                filter.push_str(&format!("&&user_id='{uid}'"));
+            }
+        }
+        let data = self
+            .get_list("work_sessions", &filter, "&sort=clock_in&perPage=500")
+            .await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+
+        let session_ids: Vec<String> = items
+            .iter()
+            .filter_map(|item| {
+                let id = item["id"].as_str().unwrap_or("");
+                if id.is_empty() { None } else { Some(id.to_string()) }
+            })
+            .collect();
+
+        // Batch-fetch breaks in groups of 15 to stay within URL limits.
+        let mut break_secs_by: HashMap<String, i64> = HashMap::new();
+        for chunk in session_ids.chunks(15) {
+            let f = chunk
+                .iter()
+                .map(|id| format!("session_id='{id}'"))
+                .collect::<Vec<_>>()
+                .join("||");
+            if let Ok(bd) = self.get_list("breaks", &f, "&perPage=500").await {
+                for b in bd["items"].as_array().cloned().unwrap_or_default() {
+                    let bs = b["start_time"].as_str().unwrap_or("");
+                    let be = b["end_time"].as_str().unwrap_or("");
+                    let sid = b["session_id"].as_str().unwrap_or("").to_string();
+                    if bs.is_empty() || sid.is_empty() { continue; }
+                    if let Some(s) = Self::parse_pb_datetime(bs) {
+                        let e = if be.is_empty() {
+                            chrono::Utc::now()
+                        } else {
+                            Self::parse_pb_datetime(be).unwrap_or_else(chrono::Utc::now)
+                        };
+                        *break_secs_by.entry(sid).or_insert(0) +=
+                            (e - s).num_seconds().max(0);
+                    }
+                }
+            }
+        }
+
+        let now = chrono::Utc::now();
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                let session_id = item["id"].as_str()?.to_string();
+                if session_id.is_empty() { return None; }
+                let clock_in =
+                    Self::parse_pb_datetime(item["clock_in"].as_str().unwrap_or(""))?;
+                let clock_out_str = item["clock_out"].as_str().unwrap_or("");
+                let clock_out = if clock_out_str.is_empty() {
+                    None
+                } else {
+                    Self::parse_pb_datetime(clock_out_str)
+                };
+                let effective_end = clock_out.unwrap_or(now);
+                let gross_seconds = (effective_end - clock_in).num_seconds().max(0);
+                let break_seconds =
+                    break_secs_by.get(&session_id).copied().unwrap_or(0);
+                let net_seconds = (gross_seconds - break_seconds).max(0);
+                let user_email = item["user_email"].as_str().unwrap_or("").to_string();
+                let raw_name = item["user_name"].as_str().unwrap_or("").trim().to_string();
+                let user_name = if raw_name.is_empty() {
+                    user_email.split('@').next().unwrap_or("").to_string()
+                } else {
+                    raw_name
+                };
+                Some(crate::session::SessionRecord {
+                    session_id: session_id.clone(),
+                    user_id: item["user_id"].as_str().unwrap_or("").to_string(),
+                    user_name,
+                    user_email,
+                    clock_in,
+                    clock_out,
+                    status: item["status"].as_str().unwrap_or("completed").to_string(),
+                    gross_seconds,
+                    break_seconds,
+                    net_seconds,
+                    break_count: item["break_count"].as_u64().unwrap_or(0) as u32,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn get_network_in_range(
+        &self,
+        from: &chrono::DateTime<chrono::Utc>,
+        to: &chrono::DateTime<chrono::Utc>,
+        user_id: Option<&str>,
+    ) -> Result<crate::session::NetworkReport> {
+        let sessions = self.get_sessions_in_range(from, to, user_id).await?;
+        let session_ids: Vec<String> =
+            sessions.iter().map(|s| s.session_id.clone()).collect();
+
+        let mut all_records: Vec<crate::session::NetworkRecord> = Vec::new();
+        let mut host_counts: HashMap<String, u32> = HashMap::new();
+        let mut proc_counts: HashMap<String, u32> = HashMap::new();
+
+        for chunk in session_ids.chunks(10) {
+            let f = chunk
+                .iter()
+                .map(|id| format!("session_id='{id}'"))
+                .collect::<Vec<_>>()
+                .join("||");
+            if let Ok(data) = self
+                .get_list("network_connections", &f, "&sort=timestamp&perPage=500")
+                .await
+            {
+                for item in data["items"].as_array().cloned().unwrap_or_default() {
+                    let ts_str = item["timestamp"].as_str().unwrap_or("");
+                    let Some(timestamp) = Self::parse_pb_datetime(ts_str) else {
+                        continue;
+                    };
+                    let sid = item["session_id"].as_str().unwrap_or("").to_string();
+                    let sess = sessions.iter().find(|s| s.session_id == sid);
+                    let remote_host =
+                        item["remote_host"].as_str().unwrap_or("").to_string();
+                    let remote_ip =
+                        item["remote_ip"].as_str().unwrap_or("").to_string();
+                    let process_name =
+                        item["process_name"].as_str().unwrap_or("").to_string();
+
+                    let host_key = if !remote_host.is_empty() {
+                        remote_host.clone()
+                    } else {
+                        remote_ip.clone()
+                    };
+                    if !host_key.is_empty() {
+                        *host_counts.entry(host_key).or_insert(0) += 1;
+                    }
+                    if !process_name.is_empty() {
+                        *proc_counts.entry(process_name.clone()).or_insert(0) += 1;
+                    }
+
+                    all_records.push(crate::session::NetworkRecord {
+                        timestamp,
+                        user_id: sess
+                            .map(|s| s.user_id.clone())
+                            .unwrap_or_default(),
+                        user_name: sess
+                            .map(|s| s.user_name.clone())
+                            .unwrap_or_default(),
+                        user_email: sess
+                            .map(|s| s.user_email.clone())
+                            .unwrap_or_default(),
+                        session_id: sid,
+                        process_name,
+                        remote_host,
+                        remote_ip,
+                        remote_port: item["remote_port"].as_u64().unwrap_or(0) as u16,
+                        local_port: item["local_port"].as_u64().unwrap_or(0) as u16,
+                    });
+                }
+            }
+        }
+
+        let mut top_hosts: Vec<crate::session::NetworkStat> = host_counts
+            .into_iter()
+            .map(|(name, count)| crate::session::NetworkStat { name, count })
+            .collect();
+        top_hosts.sort_by(|a, b| b.count.cmp(&a.count));
+        top_hosts.truncate(20);
+
+        let mut top_processes: Vec<crate::session::NetworkStat> = proc_counts
+            .into_iter()
+            .map(|(name, count)| crate::session::NetworkStat { name, count })
+            .collect();
+        top_processes.sort_by(|a, b| b.count.cmp(&a.count));
+        top_processes.truncate(10);
+
+        Ok(crate::session::NetworkReport {
+            records: all_records,
+            top_hosts,
+            top_processes,
+        })
+    }
+
+    pub async fn get_activity_in_range(
+        &self,
+        from: &chrono::DateTime<chrono::Utc>,
+        to: &chrono::DateTime<chrono::Utc>,
+        user_id: &str,
+    ) -> Result<crate::session::ActivityReport> {
+        let sessions = self.get_sessions_in_range(from, to, Some(user_id)).await?;
+        let session_ids: Vec<String> =
+            sessions.iter().map(|s| s.session_id.clone()).collect();
+        let session_count = session_ids.len() as u32;
+
+        let mut total_keystrokes: u64 = 0;
+        let mut total_clicks: u64 = 0;
+        let mut total_snaps: u32 = 0;
+        let mut idle_snaps: u32 = 0;
+        let mut app_seconds: HashMap<String, i64> = HashMap::new();
+
+        for chunk in session_ids.chunks(10) {
+            let f = chunk
+                .iter()
+                .map(|id| format!("session_id='{id}'"))
+                .collect::<Vec<_>>()
+                .join("||");
+            if let Ok(data) = self
+                .get_list("activity_snapshots", &f, "&sort=timestamp&perPage=2000")
+                .await
+            {
+                for item in data["items"].as_array().cloned().unwrap_or_default() {
+                    total_snaps += 1;
+                    total_keystrokes += item["keystrokes"].as_u64().unwrap_or(0);
+                    total_clicks += item["mouse_clicks"].as_u64().unwrap_or(0);
+                    let idle = item["idle_seconds"].as_u64().unwrap_or(0);
+                    if idle >= 60 {
+                        idle_snaps += 1;
+                    } else {
+                        let app = item["active_app"].as_str().unwrap_or("").to_string();
+                        if !app.is_empty() {
+                            *app_seconds.entry(app).or_insert(0) += 30;
+                        }
+                    }
+                }
+            }
+        }
+
+        let idle_pct = if total_snaps > 0 {
+            idle_snaps as f32 / total_snaps as f32 * 100.0
+        } else {
+            0.0
+        };
+        let total_tracked: i64 = app_seconds.values().sum();
+        let mut top_apps: Vec<crate::session::AppUsage> = app_seconds
+            .into_iter()
+            .map(|(app, seconds)| crate::session::AppUsage {
+                pct: if total_tracked > 0 {
+                    seconds as f32 / total_tracked as f32 * 100.0
+                } else {
+                    0.0
+                },
+                app,
+                seconds,
+            })
+            .collect();
+        top_apps.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+        top_apps.truncate(10);
+
+        Ok(crate::session::ActivityReport {
+            total_keystrokes,
+            total_clicks,
+            idle_pct,
+            top_apps,
+            session_count,
+            total_snapshot_count: total_snaps,
+        })
+    }
+
     async fn get_latest_active_app(&self, session_id: &str) -> Result<String> {
         let url = format!(
             "{}/api/collections/activity_snapshots/records?filter={}&sort=-timestamp&perPage=1",

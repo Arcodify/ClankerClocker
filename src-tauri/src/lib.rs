@@ -642,6 +642,11 @@ pub fn run() {
             commands::save_work_schedule,
             commands::refresh_auth_state,
             commands::clear_auth,
+            commands::get_all_users,
+            commands::get_sessions_report,
+            commands::get_time_summary,
+            commands::get_network_report,
+            commands::get_activity_report,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");

@@ -210,6 +210,85 @@ impl Default for AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub session_id: String,
+    pub user_id: String,
+    pub user_name: String,
+    pub user_email: String,
+    pub clock_in: DateTime<Utc>,
+    pub clock_out: Option<DateTime<Utc>>,
+    pub status: String,
+    pub gross_seconds: i64,
+    pub break_seconds: i64,
+    pub net_seconds: i64,
+    pub break_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSummary {
+    pub user_id: String,
+    pub user_name: String,
+    pub user_email: String,
+    pub session_count: u32,
+    pub days_present: u32,
+    pub total_work_seconds: i64,
+    pub total_break_seconds: i64,
+    pub total_gross_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkStat {
+    pub name: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkRecord {
+    pub timestamp: DateTime<Utc>,
+    pub user_id: String,
+    pub user_name: String,
+    pub user_email: String,
+    pub session_id: String,
+    pub process_name: String,
+    pub remote_host: String,
+    pub remote_ip: String,
+    pub remote_port: u16,
+    pub local_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkReport {
+    pub records: Vec<NetworkRecord>,
+    pub top_hosts: Vec<NetworkStat>,
+    pub top_processes: Vec<NetworkStat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsage {
+    pub app: String,
+    pub seconds: i64,
+    pub pct: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityReport {
+    pub total_keystrokes: u64,
+    pub total_clicks: u64,
+    pub idle_pct: f32,
+    pub top_apps: Vec<AppUsage>,
+    pub session_count: u32,
+    pub total_snapshot_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppNotification {
     pub title: String,
     pub body: String,
