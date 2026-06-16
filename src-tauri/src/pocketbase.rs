@@ -61,10 +61,14 @@ pub struct PocketBase {
 
 impl PocketBase {
     pub fn new(base_url: String, token: String) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
         PocketBase {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            client: Client::new(),
+            client,
         }
     }
 
@@ -624,11 +628,27 @@ impl PocketBase {
             });
         }
 
-        let mut members = Vec::new();
+        let mut raw_members = Vec::new();
         while let Some(result) = tasks.join_next().await {
             let (_, member) = result.map_err(|e| anyhow!("team status task failed: {e}"))?;
-            members.push(member);
+            raw_members.push(member);
         }
+
+        // A user can have multiple active sessions if a previous client crashed
+        // before closing its session. Keep only the most recent session per user.
+        let mut by_user: HashMap<String, TeamMember> = HashMap::new();
+        for member in raw_members {
+            let keep = match by_user.get(&member.user_id) {
+                None => true,
+                Some(existing) => member.clock_in > existing.clock_in,
+            };
+            if keep {
+                by_user.insert(member.user_id.clone(), member);
+            }
+        }
+
+        let mut members: Vec<TeamMember> = by_user.into_values().collect();
+        members.sort_by_key(|m| m.clock_in);
 
         Ok(members)
     }
@@ -649,7 +669,7 @@ impl PocketBase {
     pub async fn get_session_snapshots(&self, session_id: &str) -> Result<Vec<ActivitySnapshot>> {
         let filter = format!("session_id='{session_id}'");
         let data = self
-            .get_list("activity_snapshots", &filter, "&sort=timestamp&perPage=500")
+            .get_list("activity_snapshots", &filter, "&sort=timestamp&perPage=2000")
             .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
         let snaps = items

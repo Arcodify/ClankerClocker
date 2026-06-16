@@ -106,13 +106,8 @@ pub async fn end_break_internal(
     let break_duration = (now - break_start).num_seconds();
     let can_sync = !break_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty();
 
-    if can_sync {
-        let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
-        pb.end_break(&break_id, &now)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
+    // Always update local state first — PB sync is best-effort so a network
+    // hiccup can never leave the user stuck on "On Break".
     let (break_count, total_break_seconds) = {
         let mut sess = session.lock();
         sess.status = SessionStatus::Active;
@@ -128,6 +123,11 @@ pub async fn end_break_internal(
         (break_count, total_break_seconds)
     };
 
+    if can_sync {
+        let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
+        pb.end_break(&break_id, &now).await.ok();
+    }
+
     if can_sync && !session_id.starts_with("local-") {
         let pb = PocketBase::new(pb_url, pb_token);
         pb.update_session_status(&session_id, &SessionStatus::Active)
@@ -140,8 +140,8 @@ pub async fn end_break_internal(
 
     notify(
         app,
-        &format!("your break {break_name} is ending"),
-        &format!("your break {break_name} is ending"),
+        &format!("your break {break_name} has ended"),
+        &format!("your break {break_name} has ended"),
     );
     update_tray(app, "active");
     Ok((break_count, total_break_seconds))
@@ -154,6 +154,7 @@ pub async fn clock_out_internal(
     config: &std::sync::Arc<parking_lot::Mutex<crate::session::AppConfig>>,
     break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
 ) -> Result<(), String> {
+    // End any open break first (best-effort, must not block clock-out).
     let status = { session.lock().status.clone() };
     if status == SessionStatus::OnBreak {
         end_break_internal(app, session, config, break_id_state)
@@ -174,18 +175,8 @@ pub async fn clock_out_internal(
 
     let now = Utc::now();
 
-    if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
-        let pb = PocketBase::new(pb_url, pb_token);
-        let extra_break_seconds = pb
-            .close_open_breaks(&session_id, &now)
-            .await
-            .unwrap_or(0);
-        let total_break_seconds = total_break_seconds + extra_break_seconds;
-        pb.close_session(&session_id, &now, total_break_seconds)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
+    // Always reset local state immediately — the user must never be
+    // stuck in "Clocked In" because of a network failure.
     {
         let mut sess = session.lock();
         *sess = crate::session::SessionState::default();
@@ -193,13 +184,26 @@ pub async fn clock_out_internal(
         drop(sess);
         app.emit("session-update", s).ok();
     }
-
     {
-        let mut counters = counters.lock();
-        *counters = ActivityCounters::default();
+        let mut c = counters.lock();
+        *c = ActivityCounters::default();
+    }
+    update_tray(app, "idle");
+
+    // PB sync is best-effort. Any failure is logged; the stale session is
+    // closed automatically by close_stale_sessions() on the next clock-in.
+    if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+        let pb = PocketBase::new(pb_url, pb_token);
+        let extra_break_seconds = pb
+            .close_open_breaks(&session_id, &now)
+            .await
+            .unwrap_or(0);
+        let total = total_break_seconds + extra_break_seconds;
+        if let Err(e) = pb.close_session(&session_id, &now, total).await {
+            log::warn!("clock_out: PB sync failed for session {session_id}: {e}");
+        }
     }
 
-    update_tray(app, "idle");
     Ok(())
 }
 
@@ -293,6 +297,14 @@ pub async fn clock_in(
     user_id: String,
     pb_token: String,
 ) -> Result<(), String> {
+    // Guard: reject if already active or on break (prevents double clock-in).
+    {
+        let status = state.session.lock().status.clone();
+        if status != SessionStatus::Idle {
+            return Err("Already clocked in".into());
+        }
+    }
+
     let (pb_url, user_name, user_email) = {
         let cfg = state.config.lock();
         (

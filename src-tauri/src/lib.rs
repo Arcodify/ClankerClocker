@@ -93,28 +93,16 @@ pub fn run() {
                         let app_clone = app.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Some(state) = app_clone.try_state::<AppState>() {
-                                let (pb_url, pb_token, session_id, total_break_secs) = {
-                                    let cfg = state.config.lock();
-                                    let sess = state.session.lock();
-                                    (
-                                        cfg.pb_url.clone(),
-                                        cfg.pb_token.clone(),
-                                        sess.session_id.clone(),
-                                        sess.total_break_seconds,
-                                    )
-                                };
-                                if let Some(sid) = session_id {
-                                    if !sid.starts_with("local-")
-                                        && !pb_url.is_empty()
-                                        && !pb_token.is_empty()
-                                    {
-                                        let pb = PocketBase::new(pb_url, pb_token);
-                                        let _ = pb
-                                            .close_session(&sid, &Utc::now(), total_break_secs)
-                                            .await;
-                                    }
-                                    *state.session.lock() = SessionState::default();
-                                }
+                                // Use the full clock_out path so open breaks are
+                                // closed properly before the process exits.
+                                let _ = commands::clock_out_internal(
+                                    &app_clone,
+                                    &state.session,
+                                    &state.counters,
+                                    &state.config,
+                                    &state.break_id,
+                                )
+                                .await;
                             }
                             app_clone.exit(0);
                         });
@@ -226,7 +214,23 @@ pub fn run() {
                     let session_id = session_snapshot.session_id.clone();
                     let idle_seconds = counters_bg.lock().idle_seconds();
 
+                    // Read active window early so it can be used for conference
+                    // detection before idle-clockout logic runs.
+                    let (active_app, active_window) = {
+                        let cached = active_window_bg.lock().clone();
+                        if !cached.0.is_empty() || !cached.1.is_empty() {
+                            cached
+                        } else {
+                            tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
+                                .await
+                                .unwrap_or_default()
+                        }
+                    };
+
                     if status == SessionStatus::Idle {
+                        // Clear per-session state so the next session starts fresh.
+                        net_seen.clear();
+                        dns_cache.clear();
                         auto_break_history_bg.lock().clear();
                         pending_auto_breaks_bg.lock().clear();
                     }
@@ -240,10 +244,15 @@ pub fn run() {
                             history.remove(&format!("{}:idle_clockout", sid));
                         }
 
+                        // Suppress idle warnings/clock-out while the user is in a
+                        // video/audio conference — talking doesn't move the mouse.
+                        let in_conference = is_conference_active(&active_app, &active_window);
+
                         let should_warn = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
                             && idle_seconds >= debug.idle_warning_seconds
-                            && idle_seconds < debug.idle_clockout_seconds;
+                            && idle_seconds < debug.idle_clockout_seconds
+                            && !in_conference;
 
                         if should_warn {
                             let key = format!("{}:idle_clockout_warning", sid);
@@ -264,7 +273,8 @@ pub fn run() {
 
                         let should_idle_clockout = status == SessionStatus::Active
                             && config_snapshot.auto_clock_out_enabled
-                            && idle_seconds >= debug.idle_clockout_seconds;
+                            && idle_seconds >= debug.idle_clockout_seconds
+                            && !in_conference;
 
                         if should_idle_clockout {
                             let key = format!("{}:idle_clockout", sid);
@@ -443,15 +453,17 @@ pub fn run() {
                                 if config.duration_minutes > 0
                                     && duration >= config.duration_minutes as i64
                                 {
-                                    let key = reminder_key(now_npt, &format!("break_end:{}", config.id));
+                                    // Key is per break-instance (not per day) so two breaks
+                                    // of the same type in one day both fire notifications.
+                                    let key = format!("break_end:{}:{}", config.id, start.timestamp());
                                     if !scheduled_notification_history_bg.lock().contains(&key) {
                                         scheduled_notification_history_bg.lock().insert(key);
                                         app_handle
                                             .emit(
                                                 "app-notification",
                                                 AppNotification {
-                                                    title: format!("your break {name} is ending"),
-                                                    body: format!("your break {name} is ending"),
+                                                    title: format!("your break {name} has ended"),
+                                                    body: "your break time is up — time to get back to work.".into(),
                                                     kind: "info".into(),
                                                 },
                                             )
@@ -465,18 +477,6 @@ pub fn run() {
                             pending_auto_breaks_bg.lock().insert(config.id.clone());
                         }
                     }
-
-                    // Prefer the compositor event cache; fall back to a fresh poll if empty.
-                    let (active_app, active_window) = {
-                        let cached = active_window_bg.lock().clone();
-                        if !cached.0.is_empty() || !cached.1.is_empty() {
-                            cached
-                        } else {
-                            tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
-                                .await
-                                .unwrap_or_default()
-                        }
-                    };
 
                     // Emit live counters every 5s without draining
                     {
@@ -616,6 +616,9 @@ pub fn run() {
                             db_sync.lock().mark_network_synced(id).ok();
                         }
                     }
+
+                    // Prune synced rows older than 7 days to keep the DB lean.
+                    db_sync.lock().cleanup_old_synced(7).ok();
                 }
             });
 
@@ -642,6 +645,38 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");
+}
+
+/// Returns true when the user appears to be in an active audio/video conference.
+/// Keyboard and mouse are naturally idle during calls, so we must not auto-clock-out.
+fn is_conference_active(app: &str, window: &str) -> bool {
+    let app_lc = app.to_lowercase();
+    let win_lc = window.to_lowercase();
+
+    // App process name covers native clients (Discord, Zoom, Teams, Slack, etc.)
+    const CONF_APPS: &[&str] = &["discord", "zoom", "teams", "slack", "webex", "whereby", "skype"];
+    if CONF_APPS.iter().any(|a| app_lc.contains(a)) {
+        return true;
+    }
+
+    // Window title covers browser-embedded meetings (Google Meet, Jitsi, etc.)
+    const CONF_TITLES: &[&str] = &[
+        "google meet",
+        "meet –",      // GNOME truncation of "Meet – Google Meet"
+        "meet -",
+        "zoom meeting",
+        "zoom call",
+        "teams meeting",
+        "slack huddle",
+        "webex meeting",
+        "jitsi meet",
+        "whereby.com",
+    ];
+    if CONF_TITLES.iter().any(|t| win_lc.contains(t)) {
+        return true;
+    }
+
+    false
 }
 
 fn auto_break_history_key(config_id: &str) -> String {

@@ -9,6 +9,8 @@ pub struct LocalDb {
 impl LocalDb {
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL mode survives power loss mid-write; NORMAL sync is safe with WAL.
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         let db = LocalDb { conn };
         db.migrate()?;
         Ok(db)
@@ -166,6 +168,21 @@ impl LocalDb {
         self.conn.execute(
             "UPDATE pending_network SET synced = 1 WHERE id = ?1",
             params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete synced rows older than `days`. Call periodically to keep the DB lean.
+    pub fn cleanup_old_synced(&self, days: i64) -> Result<()> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+        let cutoff_str = cutoff.to_rfc3339();
+        self.conn.execute(
+            "DELETE FROM pending_snapshots WHERE synced = 1 AND created_at < ?1",
+            params![cutoff_str],
+        )?;
+        self.conn.execute(
+            "DELETE FROM pending_network WHERE synced = 1 AND created_at < ?1",
+            params![cutoff_str],
         )?;
         Ok(())
     }
