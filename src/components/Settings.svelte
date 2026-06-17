@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { settings, authToken, userId, isAdmin, userName, errorMessage, view } from "../lib/stores";
+  import { APP_VERSION } from "../lib/app-meta";
 
   const dispatch = createEventDispatcher();
 
@@ -82,7 +83,11 @@
 <div class="settings">
   <header>
     <button class="back-btn" on:click={() => dispatch("back")}>← Back</button>
-    <span class="title">Settings</span>
+    <div class="title-wrap">
+      <span class="title">Settings</span>
+      <span class="version">v{APP_VERSION}</span>
+    </div>
+    <button class="about-btn" on:click={() => view.set("about")}>About</button>
   </header>
 
   <div class="form">
@@ -137,11 +142,15 @@
   </div>
 
   <div class="info">
-    <div class="info-title">Platform Notes For End Users</div>
+    <div class="info-title">What This App Records</div>
     <div class="notes">
-      <p><strong>macOS:</strong> needs Accessibility and Input Monitoring permission granted in System Settings → Privacy &amp; Security</p>
-      <p><strong>Windows:</strong> run as administrator if the tray icon or input hooks get blocked by antivirus</p>
-      <p><strong>Linux:</strong> user must be in the input group (<code>sudo usermod -aG input $USER</code>, then log out/in)</p>
+      <p>Session start and end times, plus break timing, so your work log stays accurate.</p>
+      <p>Activity counts such as keystrokes, mouse clicks, and mouse movement totals. It records counts, not the text you type.</p>
+      <p>The active app and window title, so reports can show where time was spent during a session.</p>
+      <p>Network connection metadata such as process name, host, and port, used for activity visibility and review.</p>
+      <p>Idle activity is tracked so the app can warn before an automatic clock-out if you go inactive for too long.</p>
+      <p>If a meeting is detected in apps like Zoom, Teams, Slack, Webex, or Google Meet, idle auto-clock-out is paused so calls do not get interrupted.</p>
+      <p>This is meant to help with attendance, reminders, and reporting, not to capture screenshots or private content.</p>
     </div>
   </div>
 </div>
@@ -165,7 +174,22 @@
     border-radius: 4px;
   }
   .back-btn:hover { color: #e8e8ec; background: #1e1e24; }
+  .title-wrap { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
   .title { font-size: 14px; font-weight: 600; color: #c0c0cc; }
+  .version {
+    font-size: 11px;
+    color: #7c8aa6;
+  }
+  .about-btn {
+    background: #111827;
+    border: 1px solid #263041;
+    color: #bfdbfe;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .about-btn:hover { background: #172033; }
 
   .form {
     display: flex;
@@ -255,6 +279,4 @@
     line-height: 1.5;
     font-size: 12px;
   }
-  .notes strong { color: #c0c0cc; }
-  .notes code { font-size: 11px; color: #d0d0e8; }
 </style>

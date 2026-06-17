@@ -14,6 +14,7 @@
   import Login from "./components/Login.svelte";
   import Dashboard from "./components/Dashboard.svelte";
   import Settings from "./components/Settings.svelte";
+  import About from "./components/About.svelte";
   import AdminView from "./components/AdminView.svelte";
 
   let ticker: ReturnType<typeof setInterval>;
@@ -257,6 +258,8 @@
     />
   {:else if $view === "admin"}
     <AdminView on:back={() => view.set("dashboard")} />
+  {:else if $view === "about"}
+    <About on:back={() => view.set("settings")} />
   {:else}
     <Settings on:back={() => view.set("dashboard")} />
   {/if}

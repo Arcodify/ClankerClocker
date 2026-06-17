@@ -954,8 +954,27 @@
   .date-in { background: #111118; border: 1px solid #1e1e2c; color: #c0c0d0; font-size: 12px; padding: 4px 8px; border-radius: 5px; outline: none; }
   .date-in:focus { border-color: #3b82f6; }
   .date-sep { color: #3a3a52; font-size: 11px; }
-  .user-sel { background: #111118; border: 1px solid #1e1e2c; color: #c0c0d0; font-size: 12px; padding: 4px 8px; border-radius: 5px; outline: none; cursor: pointer; }
+  .user-sel {
+    background: #111118;
+    border: 1px solid #1e1e2c;
+    color: #c0c0d0;
+    font-size: 12px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    color-scheme: dark;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  }
+  .user-sel option {
+    background: #111118;
+    color: #e4e4f0;
+  }
   .user-sel.wide { min-width: 220px; }
+  .user-sel:focus { border-color: #3b82f6; }
   .apply-btn { background: #1a2a4a; border: 1px solid #2a3a6a; color: #3b82f6; font-size: 12px; font-weight: 700; padding: 4px 14px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
   .apply-btn:hover { background: #1e3060; border-color: #3b82f6; }
 
