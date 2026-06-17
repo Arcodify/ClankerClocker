@@ -2,7 +2,7 @@ import packageJson from "../../package.json";
 
 export const APP_NAME = "Clanker Clocker";
 export const APP_VERSION = packageJson.version;
-export const APP_LAST_UPDATED = "2026-06-16";
+export const APP_LAST_UPDATED = "2026-06-17";
 
 export const APP_CREDITS = [
   { role: "Developer", name: "scelester", detail: "Arcodify" },
