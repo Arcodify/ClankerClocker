@@ -139,6 +139,7 @@ pub struct TodayStats {
     pub total_work_seconds: i64,
     pub break_count: u32,
     pub total_break_seconds: i64,
+    pub total_net_loss_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +150,7 @@ pub struct TodaySessionBreakdown {
     pub gross_seconds: i64,
     pub break_seconds: i64,
     pub net_seconds: i64,
+    pub net_loss_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +159,7 @@ pub struct TodayBreakdown {
     pub total_work_seconds: i64,
     pub break_count: u32,
     pub total_break_seconds: i64,
+    pub total_net_loss_seconds: i64,
     pub sessions: Vec<TodaySessionBreakdown>,
 }
 
@@ -229,6 +232,7 @@ pub struct SessionRecord {
     pub gross_seconds: i64,
     pub break_seconds: i64,
     pub net_seconds: i64,
+    pub net_loss_seconds: i64,
     pub break_count: u32,
 }
 
@@ -242,6 +246,7 @@ pub struct UserSummary {
     pub total_work_seconds: i64,
     pub total_break_seconds: i64,
     pub total_gross_seconds: i64,
+    pub total_net_loss_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -20,7 +20,23 @@
   let ticker: ReturnType<typeof setInterval>;
   const notifications = writable<Array<{ id: string; title: string; body: string }>>([]);
 
+  const notificationSoundPaths: Record<string, string> = {
+    clock_in_reminder: "/audio/clock_in_reminder.mp3",
+    idle_clockout_warning: "/audio/idle_clockout_warning.mp3",
+    idle_clockout: "/audio/idle_clockout.mp3",
+    scheduled_clockout_warning: "/audio/scheduled_clockout_warning.mp3",
+    scheduled_clockout: "/audio/scheduled_clockout.mp3",
+    info: "/audio/info.mp3",
+  };
+
+  const notificationSoundCache = new Map<string, HTMLAudioElement>();
+  const notificationBufferCache = new Map<string, AudioBuffer>();
+  const notificationBufferLoads = new Map<string, Promise<AudioBuffer>>();
+  const audioUnlockEvents = ["pointerdown", "keydown", "mousedown", "touchstart"];
+  const notificationGain = 2.8;
+
   let audioCtx: AudioContext | null = null;
+  let audioPrimed = false;
 
   function getAudioContext(): AudioContext | null {
     try {
@@ -33,6 +49,72 @@
       return audioCtx;
     } catch (_) {
       return null;
+    }
+  }
+
+  function getNotificationAudio(kind: string): HTMLAudioElement {
+    const soundKey = notificationSoundPaths[kind] ? kind : "info";
+    let audio = notificationSoundCache.get(soundKey);
+    if (!audio) {
+      audio = new Audio(notificationSoundPaths[soundKey]);
+      audio.preload = "auto";
+      notificationSoundCache.set(soundKey, audio);
+    }
+    return audio;
+  }
+
+  async function loadNotificationBuffer(kind: string): Promise<AudioBuffer | null> {
+    const soundKey = notificationSoundPaths[kind] ? kind : "info";
+    const cached = notificationBufferCache.get(soundKey);
+    if (cached) return cached;
+
+    const pending = notificationBufferLoads.get(soundKey);
+    if (pending) return pending;
+
+    const promise = (async () => {
+      const ctx = getAudioContext();
+      if (!ctx) return null;
+
+      const response = await fetch(notificationSoundPaths[soundKey]);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch ${soundKey} notification audio`);
+      }
+
+      const buffer = await ctx.decodeAudioData(await response.arrayBuffer());
+      notificationBufferCache.set(soundKey, buffer);
+      return buffer;
+    })();
+
+    notificationBufferLoads.set(soundKey, promise);
+    try {
+      return await promise;
+    } finally {
+      notificationBufferLoads.delete(soundKey);
+    }
+  }
+
+  async function primeNotificationAudio() {
+    if (audioPrimed) return;
+
+    const ctx = getAudioContext();
+    if (ctx && ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch (_) {}
+    }
+
+    const audio = getNotificationAudio("info");
+    const previousVolume = audio.volume;
+    audio.volume = 0.01;
+    try {
+      await audio.play();
+      audio.pause();
+      audio.currentTime = 0;
+      audioPrimed = true;
+    } catch (_) {
+      // The gesture may not have been enough yet; try again on the next user input.
+    } finally {
+      audio.volume = previousVolume;
     }
   }
 
@@ -53,49 +135,93 @@
   // Each reminder gets its own short, subtle melody so they're recognizable
   // by ear without looking at the screen.
   function playNotificationSound(kind: string) {
-    const ctx = getAudioContext();
-    if (!ctx) return;
-    const now = ctx.currentTime;
+    const fallback = () => {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
 
-    switch (kind) {
-      case "clock_in_reminder":
-        // gentle ascending chime — time to start your day
-        [523.25, 659.25, 783.99].forEach((freq, i) =>
-          playTone(ctx, freq, now + i * 0.15, 0.35, 0.16)
-        );
-        break;
-      case "idle_clockout_warning":
-        // quick repeated beeps — heads up, you're about to be clocked out
-        [880, 880, 880].forEach((freq, i) =>
-          playTone(ctx, freq, now + i * 0.18, 0.12, 0.2)
-        );
-        break;
-      case "idle_clockout":
-        // descending two-tone — you've been clocked out for inactivity
-        [440, 277.18].forEach((freq, i) =>
-          playTone(ctx, freq, now + i * 0.18, 0.4, 0.18)
-        );
-        break;
-      case "scheduled_clockout_warning":
-        // two-tone heads up, distinct from the idle warning
-        [659.25, 523.25].forEach((freq, i) =>
-          playTone(ctx, freq, now + i * 0.16, 0.25, 0.18)
-        );
-        break;
-      case "scheduled_clockout":
-        // descending triad — your work day is done
-        [523.25, 392.0, 261.63].forEach((freq, i) =>
-          playTone(ctx, freq, now + i * 0.18, 0.4, 0.16)
-        );
-        break;
-      default:
-        break;
-    }
+      switch (kind) {
+        case "clock_in_reminder":
+          // gentle ascending chime — time to start your day
+          [523.25, 659.25, 783.99].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.15, 0.35, 0.32)
+          );
+          break;
+        case "idle_clockout_warning":
+          // quick repeated beeps — heads up, you're about to be clocked out
+          [880, 880, 880].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.18, 0.12, 0.34)
+          );
+          break;
+        case "idle_clockout":
+          // descending two-tone — you've been clocked out for inactivity
+          [440, 277.18].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.18, 0.4, 0.3)
+          );
+          break;
+        case "scheduled_clockout_warning":
+          // two-tone heads up, distinct from the idle warning
+          [659.25, 523.25].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.16, 0.25, 0.3)
+          );
+          break;
+        case "scheduled_clockout":
+          // descending triad — your work day is done
+          [523.25, 392.0, 261.63].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.18, 0.4, 0.28)
+          );
+          break;
+        default:
+          break;
+      }
+    };
+
+    loadNotificationBuffer(kind)
+      .then((buffer) => {
+        if (!buffer) {
+          fallback();
+          return;
+        }
+
+        const ctx = getAudioContext();
+        if (!ctx) {
+          fallback();
+          return;
+        }
+
+        const source = ctx.createBufferSource();
+        const gainNode = ctx.createGain();
+        source.buffer = buffer;
+        gainNode.gain.value = notificationGain;
+        source.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        source.start();
+      })
+      .catch(() => {
+        fallback();
+      });
+  }
+
+  function attachAudioUnlockListeners() {
+    const unlock = () => {
+      primeNotificationAudio().catch(() => {});
+    };
+
+    audioUnlockEvents.forEach((eventName) => {
+      window.addEventListener(eventName, unlock, { passive: true });
+    });
+
+    return () => {
+      audioUnlockEvents.forEach((eventName) => {
+        window.removeEventListener(eventName, unlock);
+      });
+    };
   }
 
   onMount(() => {
     console.log("App mounted");
     initialize().catch(err => console.error("Initialize failed:", err));
+    const detachAudioUnlockListeners = attachAudioUnlockListeners();
 
     // Restore running session from the Rust side (survives UI restarts)
     invoke<SessionState>("get_session_state").then(state => {
@@ -162,6 +288,7 @@
     return () => {
       clearInterval(ticker);
       unlistens.forEach(p => p.catch(() => {}).then(u => u && u()));
+      detachAudioUnlockListeners();
     };
   });
 

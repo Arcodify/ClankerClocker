@@ -448,6 +448,7 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             total_work_seconds: work_secs,
             break_count: sess_break_count,
             total_break_seconds: sess_break_secs,
+            total_net_loss_seconds: 0,
         });
     }
 
@@ -828,11 +829,13 @@ pub async fn get_time_summary(
             total_work_seconds: 0,
             total_break_seconds: 0,
             total_gross_seconds: 0,
+            total_net_loss_seconds: 0,
         });
         e.session_count += 1;
         e.total_work_seconds += s.net_seconds;
         e.total_break_seconds += s.break_seconds;
         e.total_gross_seconds += s.gross_seconds;
+        e.total_net_loss_seconds += s.net_loss_seconds;
         let date = s
             .clock_in
             .with_timezone(&nepal)

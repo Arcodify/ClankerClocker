@@ -77,6 +77,7 @@
     user_id: string; user_name: string; user_email: string; date: string;
     first_clock_in: string; last_clock_out: string | null;
     gross_seconds: number; break_seconds: number; net_seconds: number;
+    net_loss_seconds: number;
     break_count: number; session_count: number; status: string;
   }
   let attendanceSessions: SessionRecord[] = [];
@@ -262,7 +263,8 @@
           user_id: s.user_id, user_name: s.user_name, user_email: s.user_email,
           date, first_clock_in: s.clock_in, last_clock_out: s.clock_out,
           gross_seconds: s.gross_seconds, break_seconds: s.break_seconds,
-          net_seconds: s.net_seconds, break_count: s.break_count,
+          net_seconds: s.net_seconds, net_loss_seconds: s.net_loss_seconds,
+          break_count: s.break_count,
           session_count: 1, status: s.status,
         });
       } else {
@@ -272,6 +274,7 @@
         row.gross_seconds += s.gross_seconds;
         row.break_seconds += s.break_seconds;
         row.net_seconds += s.net_seconds;
+        row.net_loss_seconds += s.net_loss_seconds;
         row.break_count += s.break_count;
         row.session_count += 1;
         if (s.status === "active") row.status = "active";
@@ -342,19 +345,20 @@
 
   function downloadAttendanceCSV() {
     if (attendanceExpand) {
-      const hdrs = ["User","Email","Date (NPT)","Clock In (NPT)","Clock Out (NPT)","Gross (h)","Break (h)","Net Work (h)","Breaks","Status"];
+      const hdrs = ["User","Email","Date (NPT)","Clock In (NPT)","Clock Out (NPT)","Gross (h)","Break (h)","Net Loss (h)","Net Work (h)","Breaks","Status"];
       const rows = sortedSessions.map(s => [
         s.user_name, s.user_email,
         nptDate(s.clock_in), nptTime(s.clock_in),
         s.clock_out ? nptTime(s.clock_out) : "",
         (s.gross_seconds / 3600).toFixed(2),
         (s.break_seconds / 3600).toFixed(2),
+        (s.net_loss_seconds / 3600).toFixed(2),
         (s.net_seconds / 3600).toFixed(2),
         String(s.break_count), s.status,
       ].map(csvEscape).join(","));
       triggerDownload(`attendance_sessions_${fromDate}_to_${toDate}.csv`, [hdrs.join(","), ...rows].join("\n"), "text/csv");
     } else {
-      const hdrs = ["User","Email","Date (NPT)","First In (NPT)","Last Out (NPT)","Sessions","Gross (h)","Break (h)","Net Work (h)","Breaks","Status"];
+      const hdrs = ["User","Email","Date (NPT)","First In (NPT)","Last Out (NPT)","Sessions","Gross (h)","Break (h)","Net Loss (h)","Net Work (h)","Breaks","Status"];
       const rows = dailyRows.map(r => [
         r.user_name, r.user_email, r.date,
         nptTime(r.first_clock_in),
@@ -362,6 +366,7 @@
         String(r.session_count),
         (r.gross_seconds / 3600).toFixed(2),
         (r.break_seconds / 3600).toFixed(2),
+        (r.net_loss_seconds / 3600).toFixed(2),
         (r.net_seconds / 3600).toFixed(2),
         String(r.break_count), r.status,
       ].map(csvEscape).join(","));
@@ -376,13 +381,14 @@
   }
 
   function downloadSummaryCSV() {
-    const hdrs = ["User","Email","Days Present","Sessions","Total Work (h)","Total Break (h)","Total Gross (h)","Avg Daily Work (h)"];
+    const hdrs = ["User","Email","Days Present","Sessions","Total Work (h)","Total Break (h)","Total Gross (h)","Total Net Loss (h)","Avg Daily Work (h)"];
     const rows = summaryData.map(s => [
       s.user_name, s.user_email,
       String(s.days_present), String(s.session_count),
       (s.total_work_seconds / 3600).toFixed(2),
       (s.total_break_seconds / 3600).toFixed(2),
       (s.total_gross_seconds / 3600).toFixed(2),
+      (s.total_net_loss_seconds / 3600).toFixed(2),
       (s.days_present > 0 ? s.total_work_seconds / s.days_present / 3600 : 0).toFixed(2),
     ].map(csvEscape).join(","));
     triggerDownload(`summary_${fromDate}_to_${toDate}.csv`, [hdrs.join(","), ...rows].join("\n"), "text/csv");
@@ -539,6 +545,7 @@
           <div class="sum-card"><span class="sumv">{elapsed(liveSelected.clock_in)}</span><span class="suml">Since In</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_work_seconds)}</span><span class="suml">Today Work</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_break_seconds)}</span><span class="suml">Today Break</span></div>
+          <div class="sum-card"><span class="sumv">{hhmm(liveBreakdown?.total_net_loss_seconds ?? 0)}</span><span class="suml">Today Net Loss</span></div>
           <div class="sum-card"><span class="sumv">{liveSelected.break_count}</span><span class="suml">Breaks</span></div>
         </div>
         <div class="tabs">
@@ -608,6 +615,7 @@
                   <div class="break-stats">
                     <span><b>Gross</b> {hhmm(s.gross_seconds)}</span>
                     <span><b>Break</b> {hhmm(s.break_seconds)}</span>
+                    <span><b>Net Loss</b> {hhmm(s.net_loss_seconds)}</span>
                     <span><b>Net</b> {hhmm(s.net_seconds)}</span>
                   </div>
                 </div>
@@ -647,6 +655,7 @@
                 <th>Sessions</th>
                 <th>Gross</th>
                 <th>Break</th>
+                <th>Net Loss</th>
                 <th>Net Work</th>
                 <th>Status</th>
               </tr>
@@ -661,6 +670,7 @@
                   <td class="mono">{r.session_count}</td>
                   <td class="mono">{hhmm(r.gross_seconds)}</td>
                   <td class="mono">{hhmm(r.break_seconds)}</td>
+                  <td class="mono">{hhmm(r.net_loss_seconds)}</td>
                   <td class="mono bold">{hhmm(r.net_seconds)}</td>
                   <td><span class="status-badge" class:badge-active={r.status === "active"} class:badge-done={r.status === "completed"}>{r.status}</span></td>
                 </tr>
@@ -687,6 +697,7 @@
                 <th on:click={() => sortBy("clock_out")}>Clock Out</th>
                 <th on:click={() => sortBy("gross_seconds")}>Gross {SORT_ICON("gross_seconds")}</th>
                 <th on:click={() => sortBy("break_seconds")}>Break {SORT_ICON("break_seconds")}</th>
+                <th on:click={() => sortBy("net_loss_seconds")}>Net Loss {SORT_ICON("net_loss_seconds")}</th>
                 <th on:click={() => sortBy("net_seconds")}>Net Work {SORT_ICON("net_seconds")}</th>
                 <th>Breaks</th>
                 <th>Status</th>
@@ -701,6 +712,7 @@
                   <td class="mono">{s.clock_out ? nptTime(s.clock_out) : "—"}</td>
                   <td class="mono">{hhmm(s.gross_seconds)}</td>
                   <td class="mono">{hhmm(s.break_seconds)}</td>
+                  <td class="mono">{hhmm(s.net_loss_seconds)}</td>
                   <td class="mono bold">{hhmm(s.net_seconds)}</td>
                   <td class="mono">{s.break_count}</td>
                   <td><span class="status-badge" class:badge-active={s.status === "active"} class:badge-done={s.status === "completed"}>{s.status}</span></td>
@@ -742,6 +754,7 @@
                 <th>Total Work</th>
                 <th>Total Break</th>
                 <th>Total Gross</th>
+                <th>Total Net Loss</th>
                 <th>Avg Daily Work</th>
               </tr>
             </thead>
@@ -755,6 +768,7 @@
                   <td class="mono bold">{hhmm(s.total_work_seconds)}</td>
                   <td class="mono">{hhmm(s.total_break_seconds)}</td>
                   <td class="mono dim">{hhmm(s.total_gross_seconds)}</td>
+                  <td class="mono">{hhmm(s.total_net_loss_seconds)}</td>
                   <td class="mono">{hhmm(Math.round(avgDaily))}</td>
                 </tr>
               {/each}

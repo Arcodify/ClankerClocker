@@ -34,6 +34,7 @@ export interface TodayStats {
   total_work_seconds: number;
   break_count: number;
   total_break_seconds: number;
+  total_net_loss_seconds: number;
 }
 
 export interface TodaySessionBreakdown {
@@ -43,6 +44,7 @@ export interface TodaySessionBreakdown {
   gross_seconds: number;
   break_seconds: number;
   net_seconds: number;
+  net_loss_seconds: number;
 }
 
 export interface TodayBreakdown {
@@ -50,6 +52,7 @@ export interface TodayBreakdown {
   total_work_seconds: number;
   break_count: number;
   total_break_seconds: number;
+  total_net_loss_seconds: number;
   sessions: TodaySessionBreakdown[];
 }
 
@@ -122,6 +125,7 @@ export interface SessionRecord {
   gross_seconds: number;
   break_seconds: number;
   net_seconds: number;
+  net_loss_seconds: number;
   break_count: number;
 }
 
@@ -134,6 +138,7 @@ export interface UserSummary {
   total_work_seconds: number;
   total_break_seconds: number;
   total_gross_seconds: number;
+  total_net_loss_seconds: number;
 }
 
 export interface NetworkStat {

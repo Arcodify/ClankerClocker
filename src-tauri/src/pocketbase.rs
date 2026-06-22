@@ -403,6 +403,15 @@ impl PocketBase {
             .map(|d| d.with_timezone(&chrono::Utc))
     }
 
+    fn timestamp_is_within_break(
+        timestamp: chrono::DateTime<chrono::Utc>,
+        intervals: &[(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)],
+    ) -> bool {
+        intervals
+            .iter()
+            .any(|(start, end)| timestamp >= *start && timestamp < *end)
+    }
+
     /// Get today's work stats for a given user.
     async fn get_today_breakdown_data(&self, user_id: &str) -> Result<TodayBreakdown> {
         // "Today" follows Nepal time (the company's operating timezone), not UTC —
@@ -418,89 +427,31 @@ impl PocketBase {
             .single()
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let filter = format!(
-            "user_id='{user_id}'&&clock_in>='{}'",
-            boundary_utc.format("%Y-%m-%d %H:%M:%S")
-        );
-        let data = self.get_list("work_sessions", &filter, "").await?;
-        let items = data["items"].as_array().cloned().unwrap_or_default();
+        let sessions = self
+            .get_sessions_in_range(&boundary_utc, &chrono::Utc::now(), Some(user_id))
+            .await?;
 
-        let session_count = items.len() as u32;
+        let session_count = sessions.len() as u32;
         let mut total_work_seconds = 0i64;
-        let mut session_ids: Vec<String> = Vec::new();
-        let mut session_summaries: Vec<TodaySessionBreakdown> = Vec::new();
-
-        for item in &items {
-            let session_id = item["id"].as_str().unwrap_or("").to_string();
-            session_ids.push(session_id.clone());
-            let clock_in = item["clock_in"].as_str().unwrap_or("");
-            let clock_out = item["clock_out"].as_str().unwrap_or("");
-            let start = Self::parse_pb_datetime(clock_in);
-            let end = if clock_out.is_empty() {
-                Some(chrono::Utc::now())
-            } else {
-                Self::parse_pb_datetime(clock_out)
-            };
-            let gross_seconds = match (start, end) {
-                (Some(s), Some(e)) => (e - s).num_seconds(),
-                _ => 0,
-            };
-            session_summaries.push(TodaySessionBreakdown {
-                session_id,
-                clock_in: start.unwrap_or_else(chrono::Utc::now),
-                clock_out: end,
-                gross_seconds,
-                break_seconds: 0,
-                net_seconds: gross_seconds,
-            });
-        }
-
-        // Count breaks across all today's sessions
-        let mut break_count = 0u32;
         let mut total_break_seconds = 0i64;
-        let mut break_seconds_by_session: HashMap<String, i64> = HashMap::new();
-        if !session_ids.is_empty() {
-            let ids_filter = session_ids
-                .iter()
-                .map(|id| format!("session_id='{id}'"))
-                .collect::<Vec<_>>()
-                .join("||");
-            if let Ok(bdata) = self.get_list("breaks", &ids_filter, "").await {
-                let bitems = bdata["items"].as_array().cloned().unwrap_or_default();
-                break_count = bitems.len() as u32;
-                for b in &bitems {
-                    let bs = b["start_time"].as_str().unwrap_or("");
-                    let be = b["end_time"].as_str().unwrap_or("");
-                    let session_id = b["session_id"].as_str().unwrap_or("").to_string();
-                    if !bs.is_empty() {
-                        let s = Self::parse_pb_datetime(bs);
-                        let e = if be.is_empty() {
-                            Some(chrono::Utc::now())
-                        } else {
-                            Self::parse_pb_datetime(be)
-                        };
-                        if let (Some(s), Some(e)) = (s, e) {
-                            let secs = (e - s).num_seconds().max(0);
-                            total_break_seconds += secs;
-                            *break_seconds_by_session.entry(session_id).or_insert(0) += secs;
-                        }
-                    }
-                }
-            }
-        }
+        let mut total_net_loss_seconds = 0i64;
+        let mut break_count = 0u32;
+        let mut session_summaries: Vec<TodaySessionBreakdown> = Vec::with_capacity(sessions.len());
 
-        for summary in &mut session_summaries {
-            let session_break = break_seconds_by_session
-                .get(&summary.session_id)
-                .copied()
-                .unwrap_or(0);
-            summary.break_seconds = session_break;
-            summary.net_seconds = summary.gross_seconds - session_break;
-            total_work_seconds += summary.net_seconds;
-        }
-
-        if total_work_seconds < 0 {
-            total_work_seconds = 0;
+        for s in sessions {
+            total_work_seconds += s.net_seconds;
+            total_break_seconds += s.break_seconds;
+            total_net_loss_seconds += s.net_loss_seconds;
+            break_count += s.break_count;
+            session_summaries.push(TodaySessionBreakdown {
+                session_id: s.session_id,
+                clock_in: s.clock_in,
+                clock_out: s.clock_out,
+                gross_seconds: s.gross_seconds,
+                break_seconds: s.break_seconds,
+                net_seconds: s.net_seconds,
+                net_loss_seconds: s.net_loss_seconds,
+            });
         }
 
         Ok(TodayBreakdown {
@@ -508,6 +459,7 @@ impl PocketBase {
             total_work_seconds,
             break_count,
             total_break_seconds,
+            total_net_loss_seconds,
             sessions: session_summaries,
         })
     }
@@ -520,6 +472,7 @@ impl PocketBase {
             total_work_seconds: data.total_work_seconds,
             break_count: data.break_count,
             total_break_seconds: data.total_break_seconds,
+            total_net_loss_seconds: data.total_net_loss_seconds,
         })
     }
 
@@ -786,6 +739,10 @@ impl PocketBase {
 
         // Batch-fetch breaks in groups of 15 to stay within URL limits.
         let mut break_secs_by: HashMap<String, i64> = HashMap::new();
+        let mut break_intervals_by: HashMap<
+            String,
+            Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        > = HashMap::new();
         for chunk in session_ids.chunks(15) {
             let f = chunk
                 .iter()
@@ -804,14 +761,49 @@ impl PocketBase {
                         } else {
                             Self::parse_pb_datetime(be).unwrap_or_else(chrono::Utc::now)
                         };
-                        *break_secs_by.entry(sid).or_insert(0) +=
+                        *break_secs_by.entry(sid.clone()).or_insert(0) +=
                             (e - s).num_seconds().max(0);
+                        break_intervals_by.entry(sid).or_default().push((s, e));
                     }
                 }
             }
         }
 
         let now = chrono::Utc::now();
+        let mut net_loss_by: HashMap<String, i64> = HashMap::new();
+        for chunk in session_ids.chunks(10) {
+            let f = chunk
+                .iter()
+                .map(|id| format!("session_id='{id}'"))
+                .collect::<Vec<_>>()
+                .join("||");
+            if let Ok(sdata) = self
+                .get_list("activity_snapshots", &f, "&sort=timestamp&perPage=2000")
+                .await
+            {
+                for item in sdata["items"].as_array().cloned().unwrap_or_default() {
+                    let sid = item["session_id"].as_str().unwrap_or("").to_string();
+                    let ts = item["timestamp"].as_str().unwrap_or("");
+                    if sid.is_empty() || ts.is_empty() {
+                        continue;
+                    }
+                    let Some(timestamp) = Self::parse_pb_datetime(ts) else {
+                        continue;
+                    };
+                    let Some(idle_seconds) = item["idle_seconds"].as_u64() else {
+                        continue;
+                    };
+                    if let Some(intervals) = break_intervals_by.get(&sid) {
+                        if Self::timestamp_is_within_break(timestamp, intervals) {
+                            continue;
+                        }
+                    }
+                    let loss = std::cmp::min(idle_seconds as i64, 30);
+                    *net_loss_by.entry(sid).or_insert(0) += loss;
+                }
+            }
+        }
+
         Ok(items
             .iter()
             .filter_map(|item| {
@@ -830,6 +822,7 @@ impl PocketBase {
                 let break_seconds =
                     break_secs_by.get(&session_id).copied().unwrap_or(0);
                 let net_seconds = (gross_seconds - break_seconds).max(0);
+                let net_loss_seconds = net_loss_by.get(&session_id).copied().unwrap_or(0);
                 let user_email = item["user_email"].as_str().unwrap_or("").to_string();
                 let raw_name = item["user_name"].as_str().unwrap_or("").trim().to_string();
                 let user_name = if raw_name.is_empty() {
@@ -848,6 +841,7 @@ impl PocketBase {
                     gross_seconds,
                     break_seconds,
                     net_seconds,
+                    net_loss_seconds,
                     break_count: item["break_count"].as_u64().unwrap_or(0) as u32,
                 })
             })

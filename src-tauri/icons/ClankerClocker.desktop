@@ -1,11 +1,11 @@
 [Desktop Entry]
-Name=ClankerClocker
-Comment=Employee Time & Activity Tracker
-Exec={{bin}}
+Name={{name}}
+Comment={{comment}}
+Exec={{exec}} %U
 Icon={{icon}}
 Type=Application
 Terminal=false
-Categories=Office;Utility;
+Categories={{categories}}
 Keywords=time;tracking;work;attendance;
-StartupWMClass=ClankerClocker
+StartupWMClass={{name}}
 StartupNotify=true
