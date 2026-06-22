@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "clankerclocker"
-version = "1.0.1"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "chrono",
