@@ -46,6 +46,11 @@
       "icons/icon.ico"
     ],
     "linux": {
+      "appimage": {
+        "files": {
+          "ClankerClocker.desktop": "icons/ClankerClocker.appimage.desktop"
+        }
+      },
       "deb": {
         "desktopTemplate": "icons/ClankerClocker.desktop"
       }
