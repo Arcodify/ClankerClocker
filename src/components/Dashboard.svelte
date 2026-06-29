@@ -151,6 +151,12 @@
     return n.toLocaleString();
   }
 
+  // Rust emits "false" as a string when no active window is detected.
+  // JS treats any non-empty string as truthy, so we explicitly reject it.
+  function hasActiveApp(app: string | undefined | null): boolean {
+    return !!app && app !== "false" && app.trim().length > 0;
+  }
+
   async function installUpdate() {
     if (!updateVersion || updateInstalling) return;
     updateInstalling = true;
@@ -339,7 +345,8 @@
             <span class="sl">idle</span>
           </div>
         </div>
-        {#if liveCounters.active_app}
+        <!-- Only show active app row if app name is a real value, not "false" or empty -->
+        {#if hasActiveApp(liveCounters.active_app)}
           <div class="active-app-row">
             <span class="app-icon">▶</span>
             <span class="app-name">{liveCounters.active_app}</span>
@@ -369,7 +376,8 @@
             <span class="sl">idle</span>
           </div>
         </div>
-        {#if $latestActivity.active_app}
+        <!-- Only show active app row if app name is a real value, not "false" or empty -->
+        {#if hasActiveApp($latestActivity.active_app)}
           <div class="active-app-row">
             <span class="app-icon">▶</span>
             <span class="app-name">{$latestActivity.active_app}</span>
