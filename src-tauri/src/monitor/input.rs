@@ -28,7 +28,6 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
 
         let counters_c = counters.clone();
         let flag_c = active_flag.clone();
-        let is_pointer_device = caps.contains(EventType::RELATIVE) || caps.contains(EventType::ABSOLUTE);
 
         std::thread::Builder::new()
             .name("input-dev".into())
@@ -46,8 +45,13 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                             for ev in events {
                                 got = true;
                                 match ev.kind() {
+                                    // FIX: classify keys by their own key code only.
+                                    // Some keyboards also report a RELATIVE axis, which
+                                    // previously caused all their keypresses to be
+                                    // miscounted as mouse clicks. Click detection itself
+                                    // is unchanged.
                                     InputEventKind::Key(key) if ev.value() == 1 => {
-                                        if is_pointer_device || is_mouse_button_code(key.code()) {
+                                        if is_mouse_button_code(key.code()) {
                                             mc += 1;
                                         } else {
                                             ks += 1;
@@ -86,7 +90,19 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
     }
 
     eprintln!("[input-monitor] monitoring {} devices", spawned);
-    active_flag.store(spawned > 0, Ordering::Relaxed);
+
+    // --- FIX: evdev permission failure on Ubuntu ---
+    // On Ubuntu, /dev/input/* requires the user to be in the `input` group (not default).
+    // If no devices opened, log a clear fix instead of failing silently.
+    if spawned > 0 {
+        active_flag.store(true, Ordering::Relaxed);
+    } else {
+        log::warn!(
+            "[input-monitor] No /dev/input devices readable. \
+             Fix: sudo usermod -aG input $USER  then log out and back in."
+        );
+        active_flag.store(false, Ordering::Relaxed);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -96,6 +112,7 @@ fn is_mouse_button_code(code: u16) -> bool {
 }
 
 // ── macOS / Windows: rdev (uses platform APIs) ───────────────────────────────
+// Unchanged.
 
 #[cfg(not(target_os = "linux"))]
 fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBool>) {

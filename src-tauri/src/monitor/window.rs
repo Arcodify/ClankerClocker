@@ -375,6 +375,18 @@ fn sway_active_window() -> Option<(String, String)> {
 
 #[cfg(target_os = "linux")]
 fn gnome_active_window() -> Option<(String, String)> {
+    // Try Eval first (works on GNOME ≤40). On Ubuntu 21.10+ Eval is blocked,
+    // so if it returns None we fall through to the xprop-based path.
+    gnome_active_window_eval().or_else(gnome_active_window_xprop)
+}
+
+// --- FIX 1: gnome_active_window_eval ---
+// Ubuntu 21.10+ (GNOME 41+) disables org.gnome.Shell.Eval for security.
+// When blocked, gdbus still exits 0 but returns ('false', false,).
+// The old code never checked the success boolean, so "false" leaked into the UI.
+// Now we split on the LAST comma to get the boolean, and reject if it's not "true".
+#[cfg(target_os = "linux")]
+fn gnome_active_window_eval() -> Option<(String, String)> {
     use std::process::Command;
 
     let script = r#"(() => {
@@ -402,24 +414,108 @@ fn gnome_active_window() -> Option<(String, String)> {
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())?;
 
-    // gdbus returns: ('app|title', true,)
-    let raw = out
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_matches('\'')
-        .trim_matches('"')
-        .to_string();
+    // gdbus returns: ('result', success_bool,)
+    // Split on the LAST comma so window titles containing commas don't break parsing.
+    let trimmed = out.trim().trim_start_matches('(').trim_end_matches(')');
+    let last_comma = trimmed.rfind(',')?;
+    let success_str = trimmed[last_comma + 1..].trim();
+    let result_str = trimmed[..last_comma].trim().trim_matches('\'').trim_matches('"');
 
-    let (app, title) = raw
+    // Eval was blocked — don't use this result.
+    if success_str != "true" {
+        return None;
+    }
+
+    if result_str == "|" || result_str.is_empty() {
+        return None;
+    }
+
+    let (app, title) = result_str
         .split_once('|')
-        .map(|(a, t)| (a.to_string(), t.to_string()))
-        .unwrap_or((String::new(), raw));
-    Some((app, title))
+        .map(|(a, t)| (a.trim().to_string(), t.trim().to_string()))
+        .unwrap_or_else(|| (result_str.trim().to_string(), String::new()));
+
+    if app.is_empty() && title.is_empty() { None } else { Some((app, title)) }
+}
+
+// --- FIX 2: gnome_active_window_xprop ---
+// Ubuntu GNOME 41+ fallback. xprop reads _NET_ACTIVE_WINDOW from the X11 root,
+// which works on both X11 and Ubuntu's Wayland session (via XWayland).
+// No extra dependencies needed — xprop ships with Ubuntu by default (x11-utils).
+//
+// NOTE: changed signature from `fn gnome_active_window_xprop(_: ())` to take
+// zero arguments, since `Option::or_else` requires `FnOnce() -> Option<T>`
+// (zero parameters), not a function taking a `()` tuple as its single argument.
+#[cfg(target_os = "linux")]
+fn gnome_active_window_xprop() -> Option<(String, String)> {
+    use std::process::Command;
+
+    // Get the focused window ID from the root window property.
+    let root_out = Command::new("xprop")
+        .args(["-root", "_NET_ACTIVE_WINDOW"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    // Output: _NET_ACTIVE_WINDOW(WINDOW): window id # 0x3e00006
+    let win_id = root_out.split_whitespace().last()?.trim().to_string();
+    if win_id == "0x0" || win_id.is_empty() {
+        return None;
+    }
+
+    // WM_CLASS gives us the app name (second token is the class, e.g. "Firefox").
+    let wm_class = Command::new("xprop")
+        .args(["-id", &win_id, "WM_CLASS"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let app = wm_class
+        .split('=').nth(1).unwrap_or("")
+        .split(',').nth(1)
+        .unwrap_or_else(|| wm_class.split('=').nth(1).unwrap_or(""))
+        .trim().trim_matches('"').trim().to_string();
+
+    // _NET_WM_NAME gives us the window title.
+    let wm_name = Command::new("xprop")
+        .args(["-id", &win_id, "_NET_WM_NAME"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let title = wm_name
+        .split('=').nth(1).unwrap_or("")
+        .trim().trim_matches('"').trim().to_string();
+
+    if app.is_empty() && title.is_empty() {
+        return None;
+    }
+
+    // Prefer the process name from /proc/<pid>/comm for consistency with the xdotool path.
+    let pid_out = Command::new("xprop")
+        .args(["-id", &win_id, "_NET_WM_PID"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let proc_name = pid_out
+        .split('=').nth(1)
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(process_name_from_pid)
+        .unwrap_or_default();
+
+    let resolved_app = if !proc_name.is_empty() { proc_name }
+                       else if !app.is_empty()   { app }
+                       else                       { title.clone() };
+
+    Some((resolved_app, title))
 }
 
 #[cfg(target_os = "macos")]
