@@ -118,4 +118,96 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             console.error(`[auto_clockout] error processing session ${sessionId}:`, e);
         }
     }
+
+    // Sweep: an open break whose session is already completed is an orphan
+    // (crash or failed PATCH). Left alone it poisons reports — the client
+    // would count it as "still running". Close it at the session's clock_out.
+    try {
+        const openBreaks = $app.findRecordsByFilter("breaks", "end_time = ''", "", 200, 0);
+        for (const breakRecord of openBreaks) {
+            try {
+                const sessionId = breakRecord.getString("session_id");
+                let session = null;
+                try {
+                    session = $app.findRecordById("work_sessions", sessionId);
+                } catch (e) {
+                    // Session was deleted — neutralize as a zero-length break.
+                }
+                if (session && session.getString("status") !== "completed") {
+                    continue; // legitimately on break right now
+                }
+                const start = utils.parseDateTime(breakRecord.getString("start_time"));
+                let end = session ? utils.parseDateTime(session.getString("clock_out")) : null;
+                if (!end || (start && end < start)) {
+                    end = start || now;
+                }
+                breakRecord.set("end_time", end.toISOString());
+                $app.save(breakRecord);
+                console.log(`[auto_clockout] closed orphan break ${breakRecord.id} at ${end.toISOString()}`);
+            } catch (e) {
+                console.error(`[auto_clockout] orphan break sweep failed for ${breakRecord.id}:`, e);
+            }
+        }
+    } catch (e) {
+        console.error("[auto_clockout] orphan break sweep failed:", e);
+    }
+
+    // Stamp net_loss_seconds on completed sessions so report queries can use
+    // the stored value instead of re-downloading every activity snapshot.
+    // Stamps are floored at 1s so "0" reliably means "not stamped yet" —
+    // that lets the backfill below find unstamped sessions, at the cost of a
+    // 1-second rounding error nobody will ever see.
+    function stampNetLoss(session, logPrefix) {
+        const loss = Math.max(1, utils.computeNetLossSeconds(session.id));
+        if (session.getInt("net_loss_seconds") !== loss) {
+            session.set("net_loss_seconds", loss);
+            $app.save(session);
+            console.log(`${logPrefix} stamped net_loss=${loss}s on session ${session.id}`);
+        }
+    }
+
+    // Recently completed sessions: recompute for ~15 minutes after close.
+    // Idempotent, and catches every completion path (client, cron, guards).
+    try {
+        const cutoff = new Date(now.getTime() - 15 * 60 * 1000)
+            .toISOString()
+            .replace("T", " ");
+        const recent = $app.findRecordsByFilter(
+            "work_sessions",
+            `status = 'completed' && clock_out >= '${cutoff}'`,
+            "",
+            100,
+            0
+        );
+        for (const session of recent) {
+            try {
+                stampNetLoss(session, "[auto_clockout]");
+            } catch (e) {
+                console.error(`[auto_clockout] net_loss stamp failed for ${session.id}:`, e);
+            }
+        }
+    } catch (e) {
+        console.error("[auto_clockout] net_loss stamping failed:", e);
+    }
+
+    // Backfill: stamp historical sessions a few at a time. The unstamped
+    // pool only shrinks, so this block goes quiet once the backlog is done.
+    try {
+        const backlog = $app.findRecordsByFilter(
+            "work_sessions",
+            "status = 'completed' && clock_out != '' && net_loss_seconds = 0",
+            "-clock_out",
+            25,
+            0
+        );
+        for (const session of backlog) {
+            try {
+                stampNetLoss(session, "[auto_clockout backfill]");
+            } catch (e) {
+                console.error(`[auto_clockout] backfill failed for ${session.id}:`, e);
+            }
+        }
+    } catch (e) {
+        console.error("[auto_clockout] net_loss backfill failed:", e);
+    }
 });

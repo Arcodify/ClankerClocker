@@ -113,6 +113,65 @@ function closeSession(session, endTime, logPrefix) {
     console.log(`${logPrefix} — closed session ${session.id}`);
 }
 
+// Net loss = idle time outside breaks, capped at 30s per 30s snapshot.
+// Mirrors the calculation in the desktop client (pocketbase.rs) so the
+// stamped value and the client-computed fallback always agree.
+function computeNetLossSeconds(sessionId) {
+    let intervals = [];
+    try {
+        const breaks = $app.findRecordsByFilter(
+            "breaks",
+            `session_id = '${sessionId}' && end_time != ''`,
+            "",
+            200,
+            0
+        );
+        for (const b of breaks) {
+            const s = parseDateTime(b.getString("start_time"));
+            const e = parseDateTime(b.getString("end_time"));
+            if (s && e && e > s) {
+                intervals.push([s, e]);
+            }
+        }
+    } catch (err) {
+        // No breaks — nothing to exclude.
+    }
+
+    let loss = 0;
+    let page = 0;
+    const PER_PAGE = 1000;
+    for (;;) {
+        let snaps;
+        try {
+            snaps = $app.findRecordsByFilter(
+                "activity_snapshots",
+                `session_id = '${sessionId}'`,
+                "timestamp",
+                PER_PAGE,
+                page * PER_PAGE
+            );
+        } catch (err) {
+            break;
+        }
+        for (const snap of snaps) {
+            const idle = snap.getInt("idle_seconds") || 0;
+            if (idle < 1) {
+                continue;
+            }
+            const ts = parseDateTime(snap.getString("timestamp"));
+            if (ts && intervals.some(([s, e]) => ts >= s && ts < e)) {
+                continue;
+            }
+            loss += Math.min(idle, 30);
+        }
+        if (snaps.length < PER_PAGE) {
+            break;
+        }
+        page++;
+    }
+    return loss;
+}
+
 module.exports = {
     parseDateTime,
     isPastScheduledClockOut,
@@ -120,4 +179,5 @@ module.exports = {
     hasOpenBreak,
     closeOpenBreaks,
     closeSession,
+    computeNetLossSeconds,
 };

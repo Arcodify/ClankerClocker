@@ -793,6 +793,18 @@ impl PocketBase {
             })
             .collect();
 
+        // An open break on a *closed* session is an orphan (crash / failed
+        // PATCH). Counting it "until now" would add days of phantom break
+        // time, so cap every open break at its session's clock_out.
+        let session_end_by: HashMap<String, chrono::DateTime<chrono::Utc>> = items
+            .iter()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let end = Self::parse_pb_datetime(item["clock_out"].as_str().unwrap_or(""))?;
+                Some((id, end))
+            })
+            .collect();
+
         // Batch-fetch breaks in groups of 15 to stay within URL limits.
         let mut break_secs_by: HashMap<String, i64> = HashMap::new();
         let mut break_intervals_by: HashMap<
@@ -813,7 +825,11 @@ impl PocketBase {
                     if bs.is_empty() || sid.is_empty() { continue; }
                     if let Some(s) = Self::parse_pb_datetime(bs) {
                         let e = if be.is_empty() {
-                            chrono::Utc::now()
+                            session_end_by
+                                .get(&sid)
+                                .copied()
+                                .unwrap_or_else(chrono::Utc::now)
+                                .max(s)
                         } else {
                             Self::parse_pb_datetime(be).unwrap_or_else(chrono::Utc::now)
                         };
@@ -826,8 +842,21 @@ impl PocketBase {
         }
 
         let now = chrono::Utc::now();
+        // Completed sessions get net_loss_seconds stamped by the server cron;
+        // only sessions without a stamp (in-progress, or predating the
+        // feature) need the expensive snapshot download.
         let mut net_loss_by: HashMap<String, i64> = HashMap::new();
-        for chunk in session_ids.chunks(10) {
+        let mut needs_compute: Vec<String> = Vec::new();
+        for item in &items {
+            let Some(sid) = item["id"].as_str() else { continue };
+            let stamped = item["net_loss_seconds"].as_i64().unwrap_or(0);
+            if stamped > 0 {
+                net_loss_by.insert(sid.to_string(), stamped);
+            } else {
+                needs_compute.push(sid.to_string());
+            }
+        }
+        for chunk in needs_compute.chunks(10) {
             let f = chunk
                 .iter()
                 .map(|id| format!("session_id='{id}'"))
