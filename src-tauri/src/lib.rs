@@ -24,6 +24,7 @@ use session::{
     SessionStatus,
 };
 
+// store application state for each session breaks, notification, idle and monitoring
 pub struct AppState {
     pub session: Arc<Mutex<SessionState>>,
     pub counters: Arc<Mutex<ActivityCounters>>,
@@ -101,6 +102,7 @@ pub fn run() {
                                     &state.counters,
                                     &state.config,
                                     &state.break_id,
+                                    None,
                                 )
                                 .await;
                             }
@@ -137,6 +139,20 @@ pub fn run() {
                         win_clone.hide().ok();
                     }
                 });
+
+                // WebKitGTK suspends all audio until a user gesture, so
+                // notification sounds emitted while the app sits in the tray
+                // would be silent. Notifications are the whole point — allow
+                // playback without a gesture.
+                #[cfg(target_os = "linux")]
+                win.with_webview(|webview| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = webview.inner().settings() {
+                        settings.set_media_playback_requires_user_gesture(false);
+                    }
+                })
+                .ok();
+
                 win.show().ok();
             }
 
@@ -159,434 +175,33 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             monitor::window::start_hyprland_active_window_cache(active_window.clone());
 
-            // Main background loop: live counters, snapshots, network
-            let app_handle = app.handle().clone();
-            let session_bg = session.clone();
-            let counters_bg = counters.clone();
-            let config_bg = config.clone();
-            let db_bg = db.clone();
-            let break_configs_bg = break_configs.clone();
-            let break_id_bg = break_id.clone();
-            let auto_break_history_bg = auto_break_history.clone();
-            let scheduled_notification_history_bg = scheduled_notification_history.clone();
-            let pending_auto_breaks_bg = pending_auto_breaks.clone();
-            let input_monitoring_bg = input_monitoring.clone();
-            let active_window_bg = active_window.clone();
-
-            tauri::async_runtime::spawn(async move {
-                let mut net_seen: HashSet<String> = HashSet::new();
-                let mut dns_cache: HashMap<String, String> = HashMap::new();
-                let mut snapshot_tick: u32 = 0;
-                let mut network_tick: u32 = 0;
-                let mut break_config_refresh_tick: u32 = 60;
-                let mut scheduled_clockout_warned_at: Option<DateTime<Utc>> = None;
-                let debug = DebugOverrides::load();
-
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    snapshot_tick += 5;
-                    network_tick += 5;
-                    break_config_refresh_tick += 5;
-
-                    if break_config_refresh_tick >= 60 {
-                        break_config_refresh_tick = 0;
-                        let (pb_url, pb_token) = {
-                            let cfg = config_bg.lock();
-                            (cfg.pb_url.clone(), cfg.pb_token.clone())
-                        };
-
-                        if !pb_url.is_empty() && !pb_token.is_empty() {
-                            let pb = PocketBase::new(pb_url, pb_token);
-                            if let Ok(configs) = pb.get_break_configs().await {
-                                *break_configs_bg.lock() = configs;
-                            }
-                        } else {
-                            *break_configs_bg.lock() = BreakConfig::defaults();
-                        }
-                    }
-
-                    let now = Utc::now();
-                    let now_npt = now.with_timezone(&nepal_offset());
-                    let session_snapshot = session_bg.lock().clone();
-                    let mut config_snapshot = config_bg.lock().clone();
-                    debug.apply_to_config(&mut config_snapshot);
-                    let status = session_snapshot.status.clone();
-                    let session_id = session_snapshot.session_id.clone();
-                    let idle_seconds = counters_bg.lock().idle_seconds();
-
-                    // Read active window early so it can be used for conference
-                    // detection before idle-clockout logic runs.
-                    let (active_app, active_window) = {
-                        let cached = active_window_bg.lock().clone();
-                        if !cached.0.is_empty() || !cached.1.is_empty() {
-                            cached
-                        } else {
-                            tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
-                                .await
-                                .unwrap_or_default()
-                        }
-                    };
-
-                    if status == SessionStatus::Idle {
-                        // Clear per-session state so the next session starts fresh.
-                        net_seen.clear();
-                        dns_cache.clear();
-                        auto_break_history_bg.lock().clear();
-                        pending_auto_breaks_bg.lock().clear();
-                    }
-
-                    if let Some(sid) = session_id.as_ref() {
-                        // Once the user is active again, forget this episode's idle
-                        // notifications so the next idle stretch warns again.
-                        if idle_seconds < debug.idle_warning_seconds {
-                            let mut history = scheduled_notification_history_bg.lock();
-                            history.remove(&format!("{}:idle_clockout_warning", sid));
-                            history.remove(&format!("{}:idle_clockout", sid));
-                        }
-
-                        // Suppress idle warnings/clock-out while the user is in a
-                        // video/audio conference — talking doesn't move the mouse.
-                        let in_conference = is_conference_active(&active_app, &active_window);
-
-                        let should_warn = status == SessionStatus::Active
-                            && config_snapshot.auto_clock_out_enabled
-                            && idle_seconds >= debug.idle_warning_seconds
-                            && idle_seconds < debug.idle_clockout_seconds
-                            && !in_conference;
-
-                        if should_warn {
-                            let key = format!("{}:idle_clockout_warning", sid);
-                            if !scheduled_notification_history_bg.lock().contains(&key) {
-                                scheduled_notification_history_bg.lock().insert(key);
-                                app_handle
-                                    .emit(
-                                        "app-notification",
-                                        AppNotification {
-                                            title: "clock-out warning".into(),
-                                            body: "You are about to be clocked out for inactivity. Move your mouse or press any key to stay clocked in.".into(),
-                                            kind: "idle_clockout_warning".into(),
-                                        },
-                                    )
-                                    .ok();
-                            }
-                        }
-
-                        let should_idle_clockout = status == SessionStatus::Active
-                            && config_snapshot.auto_clock_out_enabled
-                            && idle_seconds >= debug.idle_clockout_seconds
-                            && !in_conference;
-
-                        if should_idle_clockout {
-                            let key = format!("{}:idle_clockout", sid);
-                            if !scheduled_notification_history_bg.lock().contains(&key) {
-                                scheduled_notification_history_bg.lock().insert(key);
-                                app_handle
-                                    .emit(
-                                        "app-notification",
-                                        AppNotification {
-                                            title: "auto clocked out for idle".into(),
-                                            body: "You were clocked out automatically after 5 minutes of inactivity.".into(),
-                                            kind: "idle_clockout".into(),
-                                        },
-                                    )
-                                    .ok();
-                            }
-
-                            let _ = commands::clock_out_internal(
-                                &app_handle,
-                                &session_bg,
-                                &counters_bg,
-                                &config_bg,
-                                &break_id_bg,
-                            )
-                            .await;
-                        }
-                    }
-
-                    if let Some(clock_in_due) =
-                        schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_in_time)
-                    {
-                        let key = reminder_key(now_npt, "clock_in");
-                        // Only fire within a short window right at clock-in time, not
-                        // any time afterwards — otherwise an app restart later in the
-                        // day (which resets the in-memory history) would re-send it.
-                        let should_notify = status == SessionStatus::Idle
-                            && now_npt >= clock_in_due
-                            && now_npt < clock_in_due + chrono::Duration::minutes(2)
-                            && !scheduled_notification_history_bg.lock().contains(&key);
-                        if should_notify {
-                            scheduled_notification_history_bg.lock().insert(key);
-                            app_handle
-                                .emit(
-                                    "app-notification",
-                                    AppNotification {
-                                        title: "your clockin time is here".into(),
-                                        body: "it's time to clock in for your shift".into(),
-                                        kind: "clock_in_reminder".into(),
-                                    },
-                                )
-                                .ok();
-                        }
-                    }
-
-                    if let Some(clock_out_due) =
-                        schedule_datetime(now_npt.date_naive(), &config_snapshot.clock_out_time)
-                    {
-                        let past_due = (status == SessionStatus::Active
-                            || status == SessionStatus::OnBreak)
-                            && now_npt >= clock_out_due;
-
-                        if past_due {
-                            // Warning notification fires once per day (key-gated)
-                            let key = reminder_key(now_npt, "clock_out");
-                            if !scheduled_notification_history_bg.lock().contains(&key) {
-                                scheduled_notification_history_bg.lock().insert(key);
-                                scheduled_clockout_warned_at = Some(now);
-                                app_handle
-                                    .emit(
-                                        "app-notification",
-                                        AppNotification {
-                                            title: "your clockout time is here".into(),
-                                            body: if config_snapshot.auto_clock_out_enabled {
-                                                "your clockout time is here. you'll be auto clocked out shortly."
-                                                    .into()
-                                            } else {
-                                                "your clockout time is here".into()
-                                            },
-                                            kind: "scheduled_clockout_warning".into(),
-                                        },
-                                    )
-                                    .ok();
-                            }
-
-                            // Auto clock-out only happens after the warning notification
-                            // (+ sound) above has had a moment to be seen/heard, and
-                            // retries every loop until it succeeds. After success the
-                            // session status becomes Idle so past_due turns false and
-                            // this block stops executing.
-                            if config_snapshot.auto_clock_out_enabled {
-                                let grace_elapsed = scheduled_clockout_warned_at
-                                    .map(|warned_at| {
-                                        (now - warned_at).num_seconds()
-                                            >= debug.clockout_grace_seconds
-                                    })
-                                    .unwrap_or(true);
-
-                                if grace_elapsed {
-                                    app_handle
-                                        .emit(
-                                            "app-notification",
-                                            AppNotification {
-                                                title: "auto clocked out".into(),
-                                                body: "your scheduled clock-out time passed. you've been clocked out automatically.".into(),
-                                                kind: "scheduled_clockout".into(),
-                                            },
-                                        )
-                                        .ok();
-
-                                    let _ = commands::clock_out_internal(
-                                        &app_handle,
-                                        &session_bg,
-                                        &counters_bg,
-                                        &config_bg,
-                                        &break_id_bg,
-                                    )
-                                    .await;
-                                    scheduled_clockout_warned_at = None;
-                                }
-                            }
-                        }
-                    }
-
-                    let mut configs = break_configs_bg.lock().clone();
-                    debug.inject_break_config(&mut configs);
-                    let history = auto_break_history_bg.lock().clone();
-                    let pending = pending_auto_breaks_bg.lock().clone();
-
-                    if status == SessionStatus::Active {
-                        if let Some(config) = find_pending_auto_break(&configs, &pending) {
-                            pending_auto_breaks_bg.lock().remove(&config.id);
-                            if commands::start_break_internal(
-                                &app_handle,
-                                &session_bg,
-                                &config_bg,
-                                &break_id_bg,
-                                &config.type_key,
-                                Some(&config.name),
-                            )
-                            .await
-                            .is_ok()
-                            {
-                                auto_break_history_bg
-                                    .lock()
-                                    .insert(auto_break_history_key(&config.id));
-                            }
-                        } else {
-                            let due = due_auto_breaks(&configs, &history);
-                            if let Some(config) = due.first() {
-                                let result = commands::start_break_internal(
-                                    &app_handle,
-                                    &session_bg,
-                                    &config_bg,
-                                    &break_id_bg,
-                                    &config.type_key,
-                                    Some(&config.name),
-                                )
-                                .await;
-                                if result.is_ok() {
-                                    auto_break_history_bg
-                                        .lock()
-                                        .insert(auto_break_history_key(&config.id));
-                                }
-                            }
-                        }
-                    } else if status == SessionStatus::OnBreak {
-                        // Check if current break should end notification
-                        let (break_start, break_name) = {
-                            let sess = session_bg.lock();
-                            (sess.break_start, sess.break_name.clone())
-                        };
-                        if let (Some(start), Some(name)) = (break_start, break_name) {
-                            let duration = (Utc::now() - start).num_minutes();
-                            // Find matching config to get planned duration
-                            if let Some(config) = configs.iter().find(|c| c.name == name) {
-                                if config.duration_minutes > 0
-                                    && duration >= config.duration_minutes as i64
-                                {
-                                    // Key is per break-instance (not per day) so two breaks
-                                    // of the same type in one day both fire notifications.
-                                    let key = format!("break_end:{}:{}", config.id, start.timestamp());
-                                    if !scheduled_notification_history_bg.lock().contains(&key) {
-                                        scheduled_notification_history_bg.lock().insert(key);
-                                        app_handle
-                                            .emit(
-                                                "app-notification",
-                                                AppNotification {
-                                                    title: format!("your break {name} has ended"),
-                                                    body: "your break time is up — time to get back to work.".into(),
-                                                    kind: "info".into(),
-                                                },
-                                            )
-                                            .ok();
-                                    }
-                                }
-                            }
-                        }
-
-                        for config in due_auto_breaks(&configs, &history) {
-                            pending_auto_breaks_bg.lock().insert(config.id.clone());
-                        }
-                    }
-
-                    // Emit live counters every 5s without draining
-                    {
-                        let c = counters_bg.lock();
-                        let live = serde_json::json!({
-                            "keystrokes": c.keystrokes,
-                            "mouse_clicks": c.mouse_clicks,
-                            "mouse_distance_px": c.mouse_distance_px,
-                            "idle_seconds": c.idle_seconds(),
-                            "active_app": &active_app,
-                            "active_window": &active_window,
-                            "input_monitoring_active": input_monitoring_bg.load(Ordering::Relaxed),
-                        });
-                        drop(c);
-                        app_handle.emit("live-counters", live).ok();
-                    }
-
-                    // Activity snapshot every 30s (drains counters)
-                    if snapshot_tick >= 30 {
-                        snapshot_tick = 0;
-                        let (ks, mc, md) = counters_bg.lock().drain();
-                        let idle = counters_bg.lock().idle_seconds();
-
-                        let snap = ActivitySnapshot {
-                            timestamp: chrono::Utc::now(),
-                            keystrokes: ks,
-                            mouse_clicks: mc,
-                            mouse_distance_px: md,
-                            active_app: active_app.clone(),
-                            active_window: active_window.clone(),
-                            idle_seconds: idle,
-                        };
-
-                        app_handle.emit("activity-update", &snap).ok();
-
-                        let (pb_url, pb_token, session_id) = {
-                            let cfg = config_bg.lock();
-                            let sess = session_bg.lock();
-                            (
-                                cfg.pb_url.clone(),
-                                cfg.pb_token.clone(),
-                                sess.session_id.clone(),
-                            )
-                        };
-
-                        if let Some(sid) = session_id {
-                            if !pb_url.is_empty() && !pb_token.is_empty() {
-                                let pb = PocketBase::new(pb_url, pb_token);
-                                if pb.push_snapshot(&sid, &snap).await.is_err() {
-                                    db_bg.lock().queue_snapshot(&sid, &snap).ok();
-                                }
-                            } else {
-                                db_bg.lock().queue_snapshot(&sid, &snap).ok();
-                            }
-                        }
-                    }
-
-                    // Network connections every 60s
-                    if network_tick >= 60 {
-                        network_tick = 0;
-
-                        let mut seen_clone = net_seen.clone();
-                        let mut cache_clone = dns_cache.clone();
-                        let result = tauri::async_runtime::spawn_blocking(move || {
-                            let conns = monitor::network::sample_connections(
-                                &mut seen_clone,
-                                &mut cache_clone,
-                            );
-                            (conns, seen_clone, cache_clone)
-                        })
-                        .await;
-
-                        let new_conns = match result {
-                            Ok((conns, updated_seen, updated_cache)) => {
-                                net_seen = updated_seen;
-                                dns_cache = updated_cache;
-                                conns
-                            }
-                            Err(_) => Vec::new(),
-                        };
-
-                        if !new_conns.is_empty() {
-                            app_handle.emit("network-update", &new_conns).ok();
-
-                            let (pb_url, pb_token, session_id) = {
-                                let cfg = config_bg.lock();
-                                let sess = session_bg.lock();
-                                (
-                                    cfg.pb_url.clone(),
-                                    cfg.pb_token.clone(),
-                                    sess.session_id.clone(),
-                                )
-                            };
-
-                            if let Some(sid) = session_id {
-                                if !pb_url.is_empty() && !pb_token.is_empty() {
-                                    let pb = PocketBase::new(pb_url, pb_token);
-                                    for conn in &new_conns {
-                                        if pb.push_network_connection(&sid, conn).await.is_err() {
-                                            db_bg.lock().queue_network(&sid, &[conn.clone()]).ok();
-                                        }
-                                    }
-                                } else {
-                                    db_bg.lock().queue_network(&sid, &new_conns).ok();
-                                }
-                            }
-                        }
-                    }
+            // Main background loop: idle/scheduled clock-out, auto-breaks,
+            // live counters, activity snapshots, network sampling. Each
+            // concern lives in its own `tick_*` method on `Background`.
+            tauri::async_runtime::spawn(
+                Background {
+                    app: app.handle().clone(),
+                    session: session.clone(),
+                    counters: counters.clone(),
+                    config: config.clone(),
+                    db: db.clone(),
+                    break_id: break_id.clone(),
+                    break_configs: break_configs.clone(),
+                    auto_break_history: auto_break_history.clone(),
+                    notification_history: scheduled_notification_history.clone(),
+                    pending_auto_breaks: pending_auto_breaks.clone(),
+                    input_monitoring: input_monitoring.clone(),
+                    active_window: active_window.clone(),
+                    debug: DebugOverrides::load(),
+                    net_seen: HashSet::new(),
+                    dns_cache: HashMap::new(),
+                    snapshot_tick: 0,
+                    network_tick: 0,
+                    break_config_refresh_tick: 60,
+                    scheduled_clockout_warned_at: None,
                 }
-            });
+                .run(),
+            );
 
             // Offline sync retry every 5 minutes
             let config_sync = config.clone();
@@ -630,6 +245,8 @@ pub fn run() {
             commands::get_session_state,
             commands::clock_in,
             commands::clock_out,
+            commands::extend_session,
+            commands::set_user_external_staff,
             commands::start_break,
             commands::end_break,
             commands::get_today_stats,
@@ -652,6 +269,503 @@ pub fn run() {
         .expect("error running tauri application");
 }
 
+/// Shared state and per-loop scratch for the 5-second background loop.
+/// `run()` is the dispatcher; each `tick_*` method owns one concern.
+struct Background {
+    app: tauri::AppHandle,
+    session: Arc<Mutex<SessionState>>,
+    counters: Arc<Mutex<ActivityCounters>>,
+    config: Arc<Mutex<AppConfig>>,
+    db: Arc<Mutex<LocalDb>>,
+    break_id: Arc<Mutex<Option<String>>>,
+    break_configs: Arc<Mutex<Vec<BreakConfig>>>,
+    auto_break_history: Arc<Mutex<HashSet<String>>>,
+    notification_history: Arc<Mutex<HashSet<String>>>,
+    pending_auto_breaks: Arc<Mutex<HashSet<String>>>,
+    input_monitoring: Arc<AtomicBool>,
+    active_window: Arc<Mutex<(String, String)>>,
+    debug: DebugOverrides,
+
+    // Loop-local scratch state
+    net_seen: HashSet<String>,
+    dns_cache: HashMap<String, String>,
+    snapshot_tick: u32,
+    network_tick: u32,
+    break_config_refresh_tick: u32,
+    scheduled_clockout_warned_at: Option<DateTime<Utc>>,
+}
+
+impl Background {
+    async fn run(mut self) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            self.snapshot_tick += 5;
+            self.network_tick += 5;
+            self.break_config_refresh_tick += 5;
+
+            self.tick_break_config_refresh().await;
+
+            let now = Utc::now();
+            let now_npt = now.with_timezone(&nepal_offset());
+            let mut config_snapshot = self.config.lock().clone();
+            self.debug.apply_to_config(&mut config_snapshot);
+
+            let (active_app, active_window) = self.read_active_window().await;
+
+            if self.status() == SessionStatus::Idle {
+                // Clear per-session state so the next session starts fresh.
+                self.net_seen.clear();
+                self.dns_cache.clear();
+                self.auto_break_history.lock().clear();
+                self.pending_auto_breaks.lock().clear();
+            }
+
+            self.tick_idle_clockout(&config_snapshot, &active_app, &active_window)
+                .await;
+            self.tick_clock_in_reminder(now_npt, &config_snapshot);
+            self.tick_scheduled_clockout(now, now_npt, &config_snapshot)
+                .await;
+            self.tick_auto_breaks().await;
+            self.emit_live_counters(&active_app, &active_window);
+
+            if self.snapshot_tick >= 30 {
+                self.snapshot_tick = 0;
+                self.push_activity_snapshot(active_app, active_window).await;
+            }
+            if self.network_tick >= 60 {
+                self.network_tick = 0;
+                self.push_network_samples().await;
+            }
+        }
+    }
+
+    fn status(&self) -> SessionStatus {
+        self.session.lock().status.clone()
+    }
+
+    fn pb(&self) -> Option<PocketBase> {
+        let cfg = self.config.lock();
+        if cfg.pb_url.is_empty() || cfg.pb_token.is_empty() {
+            return None;
+        }
+        Some(PocketBase::new(cfg.pb_url.clone(), cfg.pb_token.clone()))
+    }
+
+    fn notify(&self, kind: &str, title: &str, body: &str) {
+        self.app
+            .emit(
+                "app-notification",
+                AppNotification {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: kind.into(),
+                },
+            )
+            .ok();
+    }
+
+    /// Fires a notification at most once for `key` (kept in the in-memory
+    /// notification history). Returns true when it fired.
+    fn notify_once(&self, key: String, kind: &str, title: &str, body: &str) -> bool {
+        if self.notification_history.lock().contains(&key) {
+            return false;
+        }
+        self.notification_history.lock().insert(key);
+        self.notify(kind, title, body);
+        true
+    }
+
+    async fn read_active_window(&self) -> (String, String) {
+        // Prefer the cache (kept warm by the Hyprland listener on Linux) so
+        // conference detection sees the window before idle logic runs.
+        let cached = self.active_window.lock().clone();
+        if !cached.0.is_empty() || !cached.1.is_empty() {
+            return cached;
+        }
+        tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn tick_break_config_refresh(&mut self) {
+        if self.break_config_refresh_tick < 60 {
+            return;
+        }
+        self.break_config_refresh_tick = 0;
+        match self.pb() {
+            Some(pb) => {
+                if let Ok(configs) = pb.get_break_configs().await {
+                    *self.break_configs.lock() = configs;
+                }
+            }
+            None => *self.break_configs.lock() = BreakConfig::defaults(),
+        }
+    }
+
+    async fn tick_idle_clockout(&self, cfg: &AppConfig, active_app: &str, active_window: &str) {
+        let (status, session_id) = {
+            let sess = self.session.lock();
+            (sess.status.clone(), sess.session_id.clone())
+        };
+        let Some(sid) = session_id else { return };
+        let idle_seconds = self.counters.lock().idle_seconds();
+
+        // Once the user is active again, forget this episode's idle
+        // notifications so the next idle stretch warns again.
+        if idle_seconds < self.debug.idle_warning_seconds {
+            let mut history = self.notification_history.lock();
+            history.remove(&format!("{sid}:idle_clockout_warning"));
+            history.remove(&format!("{sid}:idle_clockout"));
+        }
+
+        if status != SessionStatus::Active || !cfg.auto_clock_out_enabled {
+            return;
+        }
+        // Suppress idle warnings/clock-out while the user is in a
+        // video/audio conference — talking doesn't move the mouse.
+        if is_conference_active(active_app, active_window) {
+            return;
+        }
+
+        if idle_seconds >= self.debug.idle_warning_seconds
+            && idle_seconds < self.debug.idle_clockout_seconds
+        {
+            self.notify_once(
+                format!("{sid}:idle_clockout_warning"),
+                "idle_clockout_warning",
+                "clock-out warning",
+                "You are about to be clocked out for inactivity. Move your mouse or press any key to stay clocked in.",
+            );
+        }
+
+        if idle_seconds >= self.debug.idle_clockout_seconds {
+            self.notify_once(
+                format!("{sid}:idle_clockout"),
+                "idle_clockout",
+                "auto clocked out for idle",
+                "You were clocked out automatically after 5 minutes of inactivity.",
+            );
+            let _ = commands::clock_out_internal(
+                &self.app,
+                &self.session,
+                &self.counters,
+                &self.config,
+                &self.break_id,
+                None,
+            )
+            .await;
+        }
+    }
+
+    fn tick_clock_in_reminder(&self, now_npt: DateTime<FixedOffset>, cfg: &AppConfig) {
+        // External staff have no fixed shift to be reminded of.
+        if cfg.is_external_staff {
+            return;
+        }
+        let Some(clock_in_due) = schedule_datetime(now_npt.date_naive(), &cfg.clock_in_time) else {
+            return;
+        };
+        // Only fire within a short window right at clock-in time, not
+        // any time afterwards — otherwise an app restart later in the
+        // day (which resets the in-memory history) would re-send it.
+        if self.status() == SessionStatus::Idle
+            && now_npt >= clock_in_due
+            && now_npt < clock_in_due + chrono::Duration::minutes(2)
+        {
+            self.notify_once(
+                reminder_key(now_npt, "clock_in"),
+                "clock_in_reminder",
+                "your clockin time is here",
+                "it's time to clock in for your shift",
+            );
+        }
+    }
+
+    async fn tick_scheduled_clockout(
+        &mut self,
+        now: DateTime<Utc>,
+        now_npt: DateTime<FixedOffset>,
+        cfg: &AppConfig,
+    ) {
+        // External staff work outside the company schedule entirely.
+        if cfg.is_external_staff {
+            return;
+        }
+        let (status, extended) = {
+            let sess = self.session.lock();
+            (sess.status.clone(), sess.extended_past_schedule)
+        };
+        if status == SessionStatus::Idle || extended {
+            return;
+        }
+        let Some(clock_out_due) = schedule_datetime(now_npt.date_naive(), &cfg.clock_out_time)
+        else {
+            return;
+        };
+        if now_npt < clock_out_due {
+            return;
+        }
+
+        // Warning notification fires once per day (key-gated)
+        if self.notify_once(
+            reminder_key(now_npt, "clock_out"),
+            "scheduled_clockout_warning",
+            "your clockout time is here",
+            if cfg.auto_clock_out_enabled {
+                "your clockout time is here. you'll be auto clocked out shortly."
+            } else {
+                "your clockout time is here"
+            },
+        ) {
+            self.scheduled_clockout_warned_at = Some(now);
+        }
+
+        if !cfg.auto_clock_out_enabled {
+            return;
+        }
+
+        // Auto clock-out only happens after the warning notification
+        // (+ sound) above has had a moment to be seen/heard.
+        let grace_elapsed = self
+            .scheduled_clockout_warned_at
+            .map(|warned_at| (now - warned_at).num_seconds() >= self.debug.clockout_grace_seconds)
+            .unwrap_or(true);
+        if !grace_elapsed {
+            return;
+        }
+
+        // If the employee still owes hours today, offer to keep working
+        // instead of force-closing the session (asked at most once per day).
+        if self.maybe_prompt_time_loss(now_npt, cfg).await {
+            self.scheduled_clockout_warned_at = None;
+            return;
+        }
+
+        self.notify(
+            "scheduled_clockout",
+            "auto clocked out",
+            "your scheduled clock-out time passed. you've been clocked out automatically.",
+        );
+        let _ = commands::clock_out_internal(
+            &self.app,
+            &self.session,
+            &self.counters,
+            &self.config,
+            &self.break_id,
+            None,
+        )
+        .await;
+        self.scheduled_clockout_warned_at = None;
+    }
+
+    /// At scheduled clock-out with a work-hour deficit, emits the
+    /// "time-loss-prompt" event so the UI can ask whether to keep working.
+    /// The session is pre-marked as extended (locally and on PocketBase) so
+    /// neither this loop nor the server cron closes it while the user
+    /// decides; declining just clocks out, ignoring it falls back to the
+    /// 5-minute idle auto-clockout. Returns true when the prompt fired.
+    async fn maybe_prompt_time_loss(&self, now_npt: DateTime<FixedOffset>, cfg: &AppConfig) -> bool {
+        let required = cfg.required_seconds();
+        if required <= 0 {
+            return false;
+        }
+        let prompt_key = reminder_key(now_npt, "time_loss_prompt");
+        if self.notification_history.lock().contains(&prompt_key) {
+            return false;
+        }
+        let Some(pb) = self.pb() else { return false };
+        let user_id = self.config.lock().user_id.clone();
+        if user_id.is_empty() {
+            return false;
+        }
+        let Ok(stats) = pb.get_today_stats(&user_id).await else {
+            return false; // offline — fall through to the normal auto clock-out
+        };
+        let deficit = required - stats.total_work_seconds;
+        if deficit < 60 {
+            return false;
+        }
+
+        self.notification_history.lock().insert(prompt_key);
+
+        let session_id = {
+            let mut sess = self.session.lock();
+            sess.extended_past_schedule = true;
+            let s = sess.clone();
+            self.app.emit("session-update", s.clone()).ok();
+            s.session_id
+        };
+        if let Some(sid) = session_id.filter(|id| !id.starts_with("local-")) {
+            pb.set_session_extended(&sid, true).await.ok();
+        }
+
+        self.app
+            .emit(
+                "time-loss-prompt",
+                serde_json::json!({ "deficit_seconds": deficit }),
+            )
+            .ok();
+        let hours = deficit / 3600;
+        let minutes = (deficit % 3600) / 60;
+        self.notify(
+            "scheduled_clockout_warning",
+            "your office time has finished",
+            &format!(
+                "you still have {hours}h {minutes:02}m of time loss today. choose whether to keep working to complete your hours."
+            ),
+        );
+        true
+    }
+
+    async fn tick_auto_breaks(&self) {
+        let status = self.status();
+        let mut configs = self.break_configs.lock().clone();
+        self.debug.inject_break_config(&mut configs);
+        let history = self.auto_break_history.lock().clone();
+        let pending = self.pending_auto_breaks.lock().clone();
+
+        if status == SessionStatus::Active {
+            // Breaks queued while the user was already on break start first;
+            // otherwise start whichever scheduled break is currently due.
+            let next = find_pending_auto_break(&configs, &pending).or_else(|| {
+                due_auto_breaks(&configs, &history).first().cloned()
+            });
+            let Some(config) = next else { return };
+            self.pending_auto_breaks.lock().remove(&config.id);
+            let started = commands::start_break_internal(
+                &self.app,
+                &self.session,
+                &self.config,
+                &self.break_id,
+                &config.type_key,
+                Some(&config.name),
+            )
+            .await
+            .is_ok();
+            if started {
+                self.auto_break_history
+                    .lock()
+                    .insert(auto_break_history_key(&config.id));
+            }
+        } else if status == SessionStatus::OnBreak {
+            // Notify when the current break has run past its planned duration.
+            let (break_start, break_name) = {
+                let sess = self.session.lock();
+                (sess.break_start, sess.break_name.clone())
+            };
+            if let (Some(start), Some(name)) = (break_start, break_name) {
+                let duration = (Utc::now() - start).num_minutes();
+                if let Some(config) = configs.iter().find(|c| c.name == name) {
+                    if config.duration_minutes > 0 && duration >= config.duration_minutes as i64 {
+                        // Key is per break-instance (not per day) so two breaks
+                        // of the same type in one day both fire notifications.
+                        self.notify_once(
+                            format!("break_end:{}:{}", config.id, start.timestamp()),
+                            "info",
+                            &format!("your break {name} has ended"),
+                            "your break time is up — time to get back to work.",
+                        );
+                    }
+                }
+            }
+
+            // Scheduled breaks that become due mid-break start once this one ends.
+            for config in due_auto_breaks(&configs, &history) {
+                self.pending_auto_breaks.lock().insert(config.id.clone());
+            }
+        }
+    }
+
+    fn emit_live_counters(&self, active_app: &str, active_window: &str) {
+        let c = self.counters.lock();
+        let live = serde_json::json!({
+            "keystrokes": c.keystrokes,
+            "mouse_clicks": c.mouse_clicks,
+            "mouse_distance_px": c.mouse_distance_px,
+            "idle_seconds": c.idle_seconds(),
+            "active_app": active_app,
+            "active_window": active_window,
+            "input_monitoring_active": self.input_monitoring.load(Ordering::Relaxed),
+        });
+        drop(c);
+        self.app.emit("live-counters", live).ok();
+    }
+
+    /// Every 30s: drain the counters into a snapshot, show it in the UI, and
+    /// push it to PocketBase (queued locally when offline).
+    async fn push_activity_snapshot(&self, active_app: String, active_window: String) {
+        let (ks, mc, md) = self.counters.lock().drain();
+        let idle = self.counters.lock().idle_seconds();
+
+        let snap = ActivitySnapshot {
+            timestamp: Utc::now(),
+            keystrokes: ks,
+            mouse_clicks: mc,
+            mouse_distance_px: md,
+            active_app,
+            active_window,
+            idle_seconds: idle,
+        };
+        self.app.emit("activity-update", &snap).ok();
+
+        let Some(sid) = self.session.lock().session_id.clone() else {
+            return;
+        };
+        match self.pb() {
+            Some(pb) => {
+                if pb.push_snapshot(&sid, &snap).await.is_err() {
+                    self.db.lock().queue_snapshot(&sid, &snap).ok();
+                }
+            }
+            None => {
+                self.db.lock().queue_snapshot(&sid, &snap).ok();
+            }
+        }
+    }
+
+    /// Every 60s: sample new outbound connections and push them to
+    /// PocketBase (queued locally when offline).
+    async fn push_network_samples(&mut self) {
+        let mut seen_clone = self.net_seen.clone();
+        let mut cache_clone = self.dns_cache.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let conns = monitor::network::sample_connections(&mut seen_clone, &mut cache_clone);
+            (conns, seen_clone, cache_clone)
+        })
+        .await;
+
+        let new_conns = match result {
+            Ok((conns, updated_seen, updated_cache)) => {
+                self.net_seen = updated_seen;
+                self.dns_cache = updated_cache;
+                conns
+            }
+            Err(_) => Vec::new(),
+        };
+        if new_conns.is_empty() {
+            return;
+        }
+
+        self.app.emit("network-update", &new_conns).ok();
+
+        let Some(sid) = self.session.lock().session_id.clone() else {
+            return;
+        };
+        match self.pb() {
+            Some(pb) => {
+                for conn in &new_conns {
+                    if pb.push_network_connection(&sid, conn).await.is_err() {
+                        self.db.lock().queue_network(&sid, &[conn.clone()]).ok();
+                    }
+                }
+            }
+            None => {
+                self.db.lock().queue_network(&sid, &new_conns).ok();
+            }
+        }
+    }
+}
+
 /// Returns true when the user appears to be in an active audio/video conference.
 /// Keyboard and mouse are naturally idle during calls, so we must not auto-clock-out.
 fn is_conference_active(app: &str, window: &str) -> bool {
@@ -659,7 +773,9 @@ fn is_conference_active(app: &str, window: &str) -> bool {
     let win_lc = window.to_lowercase();
 
     // App process name covers native clients (Discord, Zoom, Teams, Slack, etc.)
-    const CONF_APPS: &[&str] = &["discord", "zoom", "teams", "slack", "webex", "whereby", "skype"];
+    const CONF_APPS: &[&str] = &[
+        "discord", "zoom", "teams", "slack", "webex", "whereby", "skype",
+    ];
     if CONF_APPS.iter().any(|a| app_lc.contains(a)) {
         return true;
     }
@@ -667,7 +783,7 @@ fn is_conference_active(app: &str, window: &str) -> bool {
     // Window title covers browser-embedded meetings (Google Meet, Jitsi, etc.)
     const CONF_TITLES: &[&str] = &[
         "google meet",
-        "meet –",      // GNOME truncation of "Meet – Google Meet"
+        "meet –", // GNOME truncation of "Meet – Google Meet"
         "meet -",
         "zoom meeting",
         "zoom call",
@@ -727,8 +843,8 @@ fn due_auto_breaks(configs: &[BreakConfig], history: &HashSet<String>) -> Vec<Br
             else {
                 return false;
             };
-            let end_time = parse_hhmm(config.auto_end_time.as_deref().unwrap_or(""))
-                .unwrap_or(start_time);
+            let end_time =
+                parse_hhmm(config.auto_end_time.as_deref().unwrap_or("")).unwrap_or(start_time);
             now_time >= start_time && now_time <= end_time
         })
         .cloned()

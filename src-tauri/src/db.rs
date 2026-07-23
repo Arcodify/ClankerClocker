@@ -53,6 +53,7 @@ impl LocalDb {
             ("user_name", &cfg.user_name),
             ("user_email", &cfg.user_email),
             ("is_admin", &cfg.is_admin.to_string()),
+            ("is_external_staff", &cfg.is_external_staff.to_string()),
             ("clock_in_time", &cfg.clock_in_time),
             ("clock_out_time", &cfg.clock_out_time),
             (
@@ -86,6 +87,7 @@ impl LocalDb {
                 "user_name" => cfg.user_name = row.1,
                 "user_email" => cfg.user_email = row.1,
                 "is_admin" => cfg.is_admin = row.1 == "true",
+                "is_external_staff" => cfg.is_external_staff = row.1 == "true",
                 "clock_in_time" => cfg.clock_in_time = row.1,
                 "clock_out_time" => cfg.clock_out_time = row.1,
                 "auto_clock_out_enabled" => cfg.auto_clock_out_enabled = row.1 != "false",

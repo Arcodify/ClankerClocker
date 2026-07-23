@@ -23,6 +23,8 @@ pub struct PbUser {
     #[serde(default)]
     pub is_admin: bool,
     #[serde(default)]
+    pub is_external_staff: bool,
+    #[serde(default)]
     pub clock_in_time: String,
     #[serde(default)]
     pub clock_out_time: String,
@@ -44,6 +46,8 @@ pub struct PbUserRecord {
     pub name: String,
     #[serde(default)]
     pub is_admin: bool,
+    #[serde(default)]
+    pub is_external_staff: bool,
     #[serde(default)]
     pub clock_in_time: String,
     #[serde(default)]
@@ -224,7 +228,7 @@ impl PocketBase {
             let id = item["id"].as_str().unwrap_or("");
             if !id.is_empty() {
                 let break_secs = item["total_break_seconds"].as_i64().unwrap_or(0);
-                self.close_session(id, now, break_secs).await.ok();
+                self.close_session(id, now, break_secs, None).await.ok();
             }
         }
         Ok(())
@@ -235,17 +239,34 @@ impl PocketBase {
         session_id: &str,
         clock_out: &chrono::DateTime<chrono::Utc>,
         total_break_seconds: i64,
+        early_clockout_reason: Option<&str>,
     ) -> Result<()> {
+        let mut body = json!({
+            "clock_out": clock_out.to_rfc3339(),
+            "status": "completed",
+            "total_break_seconds": total_break_seconds
+        });
+        if let Some(reason) = early_clockout_reason.filter(|r| !r.trim().is_empty()) {
+            body["early_clockout_reason"] = json!(reason.trim());
+        }
+        self.patch("work_sessions", session_id, body).await
+    }
+
+    /// Marks a session as intentionally extended past the scheduled clock-out
+    /// time so neither the client loop nor the server cron auto-closes it.
+    pub async fn set_session_extended(&self, session_id: &str, extended: bool) -> Result<()> {
         self.patch(
             "work_sessions",
             session_id,
-            json!({
-                "clock_out": clock_out.to_rfc3339(),
-                "status": "completed",
-                "total_break_seconds": total_break_seconds
-            }),
+            json!({ "extended_past_schedule": extended }),
         )
         .await
+    }
+
+    /// Admin: toggle the external-staff flag on a user record.
+    pub async fn set_user_external_staff(&self, user_id: &str, value: bool) -> Result<()> {
+        self.patch("users", user_id, json!({ "is_external_staff": value }))
+            .await
     }
 
     pub async fn update_session_status(
@@ -374,23 +395,48 @@ impl PocketBase {
     }
 
     async fn get_list(&self, collection: &str, filter: &str, extra: &str) -> Result<Value> {
-        let url = format!(
-            "{}/api/collections/{}/records?filter={}&perPage=200{}",
-            self.base_url,
-            collection,
-            urlencoding::encode(filter),
-            extra,
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("PB list error: {}", resp.status()));
+        let mut page = 1usize;
+        let mut merged_items: Vec<Value> = Vec::new();
+        let mut meta: Option<Value> = None;
+
+        loop {
+            let url = format!(
+                "{}/api/collections/{}/records?filter={}&perPage=200&page={}{}",
+                self.base_url,
+                collection,
+                urlencoding::encode(filter),
+                page,
+                extra,
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Err(anyhow!("PB list error: {}", resp.status()));
+            }
+
+            let data = resp.json::<Value>().await?;
+            if meta.is_none() {
+                meta = Some(data.clone());
+            }
+
+            if let Some(items) = data["items"].as_array() {
+                merged_items.extend(items.iter().cloned());
+            }
+
+            let total_pages = data["totalPages"].as_u64().unwrap_or(1) as usize;
+            if page >= total_pages {
+                break;
+            }
+            page += 1;
         }
-        Ok(resp.json::<Value>().await?)
+
+        let mut data = meta.unwrap_or_else(|| json!({}));
+        data["items"] = Value::Array(merged_items);
+        Ok(data)
     }
 
     fn parse_pb_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -473,6 +519,7 @@ impl PocketBase {
             break_count: data.break_count,
             total_break_seconds: data.total_break_seconds,
             total_net_loss_seconds: data.total_net_loss_seconds,
+            required_seconds: 0, // filled by the commands layer from AppConfig
         })
     }
 
@@ -536,14 +583,16 @@ impl PocketBase {
                 let (user_res, active_app_res, today_res) =
                     tokio::join!(user_fut, active_app_fut, today_stats_fut);
 
+                let mut is_external_staff = false;
                 if let Ok(user) = user_res {
-                if !user.email.is_empty() {
-                    user_email = user.email;
+                    is_external_staff = user.is_external_staff;
+                    if !user.email.is_empty() {
+                        user_email = user.email;
+                    }
+                    if !user.name.trim().is_empty() {
+                        user_name = user.name.trim().to_string();
+                    }
                 }
-                if !user.name.trim().is_empty() {
-                    user_name = user.name.trim().to_string();
-                }
-            }
 
                 if user_name.is_empty() && !user_email.is_empty() {
                     user_name = user_email.split('@').next().unwrap_or("").to_string();
@@ -576,6 +625,7 @@ impl PocketBase {
                         active_app,
                         today_total_work_seconds,
                         today_total_break_seconds,
+                        is_external_staff,
                     },
                 )
             });
@@ -701,7 +751,13 @@ impl PocketBase {
                 } else {
                     raw_name
                 };
-                Some(crate::session::UserInfo { id, name, email, is_admin: false })
+                Some(crate::session::UserInfo {
+                    id,
+                    name,
+                    email,
+                    is_admin: false,
+                    is_external_staff: false,
+                })
             })
             .collect();
         users.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -843,6 +899,10 @@ impl PocketBase {
                     net_seconds,
                     net_loss_seconds,
                     break_count: item["break_count"].as_u64().unwrap_or(0) as u32,
+                    early_clockout_reason: item["early_clockout_reason"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 })
             })
             .collect())

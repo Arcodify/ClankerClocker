@@ -36,6 +36,7 @@
   "bundle": {
     "active": true,
     "publisher": "Arcodify",
+    "category": "Productivity",
     "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [

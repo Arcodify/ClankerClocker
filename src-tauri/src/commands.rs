@@ -87,9 +87,21 @@ pub async fn start_break_internal(
 
     if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
         let pb = PocketBase::new(pb_url, pb_token);
-        pb.update_session_status(&session_id, &SessionStatus::OnBreak)
+        // The server-side auto-clockout cron treats an "active" session as
+        // idle-eligible, so a failed status PATCH here can get the user
+        // clocked out mid-break. Retry once before giving up.
+        if let Err(e) = pb
+            .update_session_status(&session_id, &SessionStatus::OnBreak)
             .await
-            .ok();
+        {
+            log::warn!("start_break: status PATCH failed ({e}), retrying once");
+            if let Err(e) = pb
+                .update_session_status(&session_id, &SessionStatus::OnBreak)
+                .await
+            {
+                log::warn!("start_break: status PATCH retry failed for {session_id}: {e}");
+            }
+        }
         pb.update_session_break_metrics(&session_id, break_count, total_break_seconds)
             .await
             .ok();
@@ -111,26 +123,35 @@ pub async fn end_break_internal(
     config: &std::sync::Arc<parking_lot::Mutex<crate::session::AppConfig>>,
     break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
 ) -> Result<(u32, i64), String> {
-    let break_id = break_id_state.lock().clone().ok_or("No active break")?;
+    // A lost break id (e.g. app restart mid-break) must not trap the user on
+    // "On Break" — proceed without it and let close_open_breaks on the server
+    // close the orphaned record.
+    let break_id = break_id_state.lock().clone();
+    if break_id.is_none() && session.lock().status != SessionStatus::OnBreak {
+        return Err("No active break".into());
+    }
     let break_name = session
         .lock()
         .break_name
         .clone()
         .unwrap_or_else(|| "break".to_string());
+    let now = Utc::now();
     let (pb_url, pb_token, break_start, session_id) = {
         let cfg = config.lock();
         let sess = session.lock();
         (
             cfg.pb_url.clone(),
             cfg.pb_token.clone(),
-            sess.break_start.ok_or("No break start time")?,
+            // A missing break_start (e.g. state restored after a crash mid-break)
+            // must not leave the user stuck on "On Break" — treat it as a
+            // zero-length break and still transition back to Active.
+            sess.break_start.unwrap_or(now),
             sess.session_id.clone().ok_or("No active session")?,
         )
     };
 
-    let now = Utc::now();
-    let break_duration = (now - break_start).num_seconds();
-    let can_sync = !break_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty();
+    let break_duration = (now - break_start).num_seconds().max(0);
+    let pb_ready = !pb_url.is_empty() && !pb_token.is_empty();
 
     // Always update local state first — PB sync is best-effort so a network
     // hiccup can never leave the user stuck on "On Break".
@@ -149,16 +170,26 @@ pub async fn end_break_internal(
         (break_count, total_break_seconds)
     };
 
-    if can_sync {
-        let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
-        pb.end_break(&break_id, &now).await.ok();
-    }
-
-    if can_sync && !session_id.starts_with("local-") {
+    if !session_id.starts_with("local-") && pb_ready {
         let pb = PocketBase::new(pb_url, pb_token);
-        pb.update_session_status(&session_id, &SessionStatus::Active)
+        if let Some(id) = break_id.as_deref().filter(|id| !id.starts_with("local-")) {
+            pb.end_break(id, &now).await.ok();
+        } else {
+            // Break id was lost — close whatever open break records exist so
+            // the server-side cron doesn't see a phantom open break.
+            pb.close_open_breaks(&session_id, &now).await.ok();
+        }
+        // The cron treats an "on_break" record whose status never flipped back
+        // as still on break, so retry this PATCH once like start_break does.
+        if let Err(e) = pb
+            .update_session_status(&session_id, &SessionStatus::Active)
             .await
-            .ok();
+        {
+            log::warn!("end_break: status PATCH failed ({e}), retrying once");
+            pb.update_session_status(&session_id, &SessionStatus::Active)
+                .await
+                .ok();
+        }
         pb.update_session_break_metrics(&session_id, break_count, total_break_seconds)
             .await
             .ok();
@@ -179,6 +210,7 @@ pub async fn clock_out_internal(
     counters: &std::sync::Arc<parking_lot::Mutex<ActivityCounters>>,
     config: &std::sync::Arc<parking_lot::Mutex<crate::session::AppConfig>>,
     break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    early_clockout_reason: Option<&str>,
 ) -> Result<(), String> {
     // End any open break first (best-effort, must not block clock-out).
     let status = { session.lock().status.clone() };
@@ -225,7 +257,10 @@ pub async fn clock_out_internal(
             .await
             .unwrap_or(0);
         let total = total_break_seconds + extra_break_seconds;
-        if let Err(e) = pb.close_session(&session_id, &now, total).await {
+        if let Err(e) = pb
+            .close_session(&session_id, &now, total, early_clockout_reason)
+            .await
+        {
             log::warn!("clock_out: PB sync failed for session {session_id}: {e}");
         }
     }
@@ -253,6 +288,7 @@ pub async fn authenticate_pb(
         cfg.user_name = auth.record.name.clone();
         cfg.user_email = auth.record.email.clone();
         cfg.is_admin = auth.record.is_admin;
+        cfg.is_external_staff = auth.record.is_external_staff;
         cfg.token_saved_at = Utc::now().to_rfc3339();
         PocketBase::new(cfg.pb_url.clone(), cfg.pb_token.clone())
         // cfg guard dropped here, before any await
@@ -288,6 +324,7 @@ pub async fn authenticate_pb(
         "user_name": auth.record.name,
         "user_email": auth.record.email,
         "is_admin": auth.record.is_admin,
+        "is_external_staff": auth.record.is_external_staff,
         "token_saved_at": token_saved_at,
     }))
 }
@@ -303,6 +340,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, Str
         "user_name": cfg.user_name,
         "user_email": cfg.user_email,
         "is_admin": cfg.is_admin,
+        "is_external_staff": cfg.is_external_staff,
         "clock_in_time": cfg.clock_in_time,
         "clock_out_time": cfg.clock_out_time,
         "auto_clock_out_enabled": cfg.auto_clock_out_enabled,
@@ -385,15 +423,74 @@ pub async fn clock_in(
 }
 
 #[tauri::command]
-pub async fn clock_out(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn clock_out(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    reason: Option<String>,
+) -> Result<(), String> {
     clock_out_internal(
         &app,
         &state.session,
         &state.counters,
         &state.config,
         &state.break_id,
+        reason.as_deref(),
     )
     .await
+}
+
+/// Keep working past the scheduled clock-out to make up a time deficit.
+/// The flag is set locally and on PocketBase so neither the client loop nor
+/// the server cron auto-closes the session at schedule time.
+#[tauri::command]
+pub async fn extend_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (pb_url, pb_token, session_id) = {
+        let cfg = state.config.lock();
+        let mut sess = state.session.lock();
+        if sess.status == SessionStatus::Idle {
+            return Err("Not clocked in".into());
+        }
+        sess.extended_past_schedule = true;
+        let s = sess.clone();
+        let session_id = s.session_id.clone().ok_or("No active session")?;
+        drop(sess);
+        app.emit("session-update", s).ok();
+        (cfg.pb_url.clone(), cfg.pb_token.clone(), session_id)
+    };
+
+    if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+        let pb = PocketBase::new(pb_url, pb_token);
+        pb.set_session_extended(&session_id, true)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Admin: mark a user as external staff (works outside the company schedule).
+#[tauri::command]
+pub async fn set_user_external_staff(
+    state: State<'_, AppState>,
+    user_id: String,
+    is_external: bool,
+) -> Result<(), String> {
+    let (pb_url, pb_token, is_admin) = {
+        let cfg = state.config.lock();
+        (cfg.pb_url.clone(), cfg.pb_token.clone(), cfg.is_admin)
+    };
+    if !is_admin {
+        return Err("Admin access required".into());
+    }
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    PocketBase::new(pb_url, pb_token)
+        .set_user_external_staff(&user_id, is_external)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -423,7 +520,7 @@ pub async fn end_break(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 
 #[tauri::command]
 pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, String> {
-    let (pb_url, pb_token, user_id, sess_elapsed, sess_break_secs, sess_break_count) = {
+    let (pb_url, pb_token, user_id, required_seconds, sess_elapsed, sess_break_secs, sess_break_count) = {
         let cfg = state.config.lock();
         let sess = state.session.lock();
         let elapsed = sess
@@ -434,6 +531,7 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             cfg.pb_url.clone(),
             cfg.pb_token.clone(),
             cfg.user_id.clone(),
+            cfg.required_seconds(),
             elapsed,
             sess.total_break_seconds,
             sess.break_count,
@@ -449,13 +547,17 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             break_count: sess_break_count,
             total_break_seconds: sess_break_secs,
             total_net_loss_seconds: 0,
+            required_seconds,
         });
     }
 
     let pb = PocketBase::new(pb_url, pb_token);
-    pb.get_today_stats(&user_id)
+    let mut stats = pb
+        .get_today_stats(&user_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    stats.required_seconds = required_seconds;
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -699,6 +801,7 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         // may not return is_admin depending on PocketBase collection rules.
         // Admin can only be cleared by signing out.
         cfg.is_admin = cfg.is_admin || user.is_admin;
+        cfg.is_external_staff = user.is_external_staff;
     }
 
     // Also sync company settings during auth refresh — drop lock before await
@@ -715,18 +818,7 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         }
     }
 
-    let (cfg_save, user_name, user_email, is_admin, clock_in, clock_out, auto_out) = {
-        let cfg = state.config.lock();
-        (
-            cfg.clone(),
-            cfg.user_name.clone(),
-            cfg.user_email.clone(),
-            cfg.is_admin,
-            cfg.clock_in_time.clone(),
-            cfg.clock_out_time.clone(),
-            cfg.auto_clock_out_enabled,
-        )
-    };
+    let cfg_save = state.config.lock().clone();
 
     state
         .db
@@ -735,12 +827,13 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         .map_err(|e| e.to_string())?;
 
     Ok(json!({
-        "user_name": user_name,
-        "user_email": user_email,
-        "is_admin": is_admin,
-        "clock_in_time": clock_in,
-        "clock_out_time": clock_out,
-        "auto_clock_out_enabled": auto_out,
+        "user_name": cfg_save.user_name,
+        "user_email": cfg_save.user_email,
+        "is_admin": cfg_save.is_admin,
+        "is_external_staff": cfg_save.is_external_staff,
+        "clock_in_time": cfg_save.clock_in_time,
+        "clock_out_time": cfg_save.clock_out_time,
+        "auto_clock_out_enabled": cfg_save.auto_clock_out_enabled,
     }))
 }
 
@@ -753,6 +846,7 @@ pub async fn clear_auth(state: State<'_, AppState>) -> Result<(), String> {
         cfg.user_name = String::new();
         cfg.user_email = String::new();
         cfg.is_admin = false;
+        cfg.is_external_staff = false;
         cfg.token_saved_at = String::new();
     }
     let cfg = state.config.lock().clone();

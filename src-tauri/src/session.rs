@@ -18,6 +18,10 @@ pub struct SessionState {
     pub break_name: Option<String>,
     pub total_break_seconds: i64,
     pub break_count: u32,
+    /// User chose to keep working past the scheduled clock-out time to make
+    /// up a time deficit — scheduled auto-clockout must skip this session.
+    #[serde(default)]
+    pub extended_past_schedule: bool,
 }
 
 impl Default for SessionState {
@@ -30,6 +34,7 @@ impl Default for SessionState {
             break_name: None,
             total_break_seconds: 0,
             break_count: 0,
+            extended_past_schedule: false,
         }
     }
 }
@@ -140,6 +145,10 @@ pub struct TodayStats {
     pub break_count: u32,
     pub total_break_seconds: i64,
     pub total_net_loss_seconds: i64,
+    /// Scheduled work seconds for today (clock_in_time → clock_out_time).
+    /// 0 for external staff, who have no fixed schedule.
+    #[serde(default)]
+    pub required_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +186,8 @@ pub struct TeamMember {
     /// Totals across all of this member's sessions today (Nepal time), including the current one.
     pub today_total_work_seconds: i64,
     pub today_total_break_seconds: i64,
+    #[serde(default)]
+    pub is_external_staff: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +199,10 @@ pub struct AppConfig {
     pub user_name: String,
     pub user_email: String,
     pub is_admin: bool,
+    /// External staff work outside the company schedule: no scheduled
+    /// auto-clockout, no clock-in reminder, and no required daily hours.
+    #[serde(default)]
+    pub is_external_staff: bool,
     pub clock_in_time: String,
     pub clock_out_time: String,
     pub auto_clock_out_enabled: bool,
@@ -204,10 +219,26 @@ impl Default for AppConfig {
             user_name: String::new(),
             user_email: String::new(),
             is_admin: false,
+            is_external_staff: false,
             clock_in_time: "09:00".into(),
             clock_out_time: "18:00".into(),
             auto_clock_out_enabled: true,
             token_saved_at: String::new(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// Scheduled work seconds per day (clock_in_time → clock_out_time in NPT).
+    /// 0 when the schedule is unparsable or the user is external staff.
+    pub fn required_seconds(&self) -> i64 {
+        if self.is_external_staff {
+            return 0;
+        }
+        let parse = |v: &str| chrono::NaiveTime::parse_from_str(v, "%H:%M").ok();
+        match (parse(&self.clock_in_time), parse(&self.clock_out_time)) {
+            (Some(start), Some(end)) => (end - start).num_seconds().max(0),
+            _ => 0,
         }
     }
 }
@@ -218,6 +249,8 @@ pub struct UserInfo {
     pub name: String,
     pub email: String,
     pub is_admin: bool,
+    #[serde(default)]
+    pub is_external_staff: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +267,9 @@ pub struct SessionRecord {
     pub net_seconds: i64,
     pub net_loss_seconds: i64,
     pub break_count: u32,
+    /// Reason the employee gave when clocking out before completing their hours.
+    #[serde(default)]
+    pub early_clockout_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

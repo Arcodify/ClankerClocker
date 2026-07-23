@@ -35,6 +35,9 @@ tauri-plugin-notification = "2.3.3"
 # Linux: evdev for raw kernel input (works on X11 and Wayland)
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
+# Same webkit2gtk that wry/tauri already link — used only to relax the
+# autoplay policy so notification sounds play without a prior user gesture.
+webkit2gtk = "2.0"
 
 # macOS + Windows: rdev uses platform accessibility APIs
 [target.'cfg(not(target_os = "linux"))'.dependencies]
