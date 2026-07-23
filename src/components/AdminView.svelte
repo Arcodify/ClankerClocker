@@ -179,6 +179,22 @@
     liveDetailLoading = false;
   }
 
+  let externalToggleBusy = false;
+  async function toggleExternalStaff() {
+    if (!liveSelected || externalToggleBusy) return;
+    externalToggleBusy = true;
+    const next = !liveSelected.is_external_staff;
+    try {
+      await invoke("set_user_external_staff", {
+        userId: liveSelected.user_id,
+        isExternal: next,
+      });
+      liveSelected = { ...liveSelected, is_external_staff: next };
+      await refreshLive();
+    } catch (_) {}
+    externalToggleBusy = false;
+  }
+
   async function loadAttendance() {
     attendanceLoading = true;
     attendancePage = 0;
@@ -345,7 +361,7 @@
 
   function downloadAttendanceCSV() {
     if (attendanceExpand) {
-      const hdrs = ["User","Email","Date (NPT)","Clock In (NPT)","Clock Out (NPT)","Gross (h)","Break (h)","Net Loss (h)","Net Work (h)","Breaks","Status"];
+      const hdrs = ["User","Email","Date (NPT)","Clock In (NPT)","Clock Out (NPT)","Gross (h)","Break (h)","Net Loss (h)","Net Work (h)","Breaks","Status","Early Clock-Out Reason"];
       const rows = sortedSessions.map(s => [
         s.user_name, s.user_email,
         nptDate(s.clock_in), nptTime(s.clock_in),
@@ -355,6 +371,7 @@
         (s.net_loss_seconds / 3600).toFixed(2),
         (s.net_seconds / 3600).toFixed(2),
         String(s.break_count), s.status,
+        s.early_clockout_reason,
       ].map(csvEscape).join(","));
       triggerDownload(`attendance_sessions_${fromDate}_to_${toDate}.csv`, [hdrs.join(","), ...rows].join("\n"), "text/csv");
     } else {
@@ -512,6 +529,9 @@
                 <span class="memail">{m.user_email}</span>
               </div>
               <div class="mright">
+                {#if m.is_external_staff}
+                  <span class="badge-ext">External</span>
+                {/if}
                 <span class={m.status === "on_break" ? "badge-break" : "badge-active"}>
                   {m.status === "on_break" ? "On Break" : "Active"}
                 </span>
@@ -540,6 +560,15 @@
           <span class={liveSelected.status === "on_break" ? "badge-break" : "badge-active"}>
             {liveSelected.status === "on_break" ? "On Break" : "Active"}
           </span>
+          <button
+            class="ext-toggle"
+            class:on={liveSelected.is_external_staff}
+            disabled={externalToggleBusy}
+            title="External staff work outside the company schedule: no scheduled auto clock-out and no required daily hours."
+            on:click={toggleExternalStaff}
+          >
+            {liveSelected.is_external_staff ? "External Staff ✓" : "Mark as External"}
+          </button>
         </div>
         <div class="sum-row">
           <div class="sum-card"><span class="sumv">{elapsed(liveSelected.clock_in)}</span><span class="suml">Since In</span></div>
@@ -701,6 +730,7 @@
                 <th on:click={() => sortBy("net_seconds")}>Net Work {SORT_ICON("net_seconds")}</th>
                 <th>Breaks</th>
                 <th>Status</th>
+                <th>Reason</th>
               </tr>
             </thead>
             <tbody>
@@ -716,6 +746,13 @@
                   <td class="mono bold">{hhmm(s.net_seconds)}</td>
                   <td class="mono">{s.break_count}</td>
                   <td><span class="status-badge" class:badge-active={s.status === "active"} class:badge-done={s.status === "completed"}>{s.status}</span></td>
+                  <td>
+                    {#if s.early_clockout_reason}
+                      <span class="reason-bubble" title={s.early_clockout_reason}>💬</span>
+                    {:else}
+                      <span class="dim">—</span>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -1029,6 +1066,12 @@
   .badge-active { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #22c55e; background: #0a1f0a; border: 1px solid #1a3a1a; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
   .badge-break { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #f59e0b; background: #1c1a10; border: 1px solid #3a2e00; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
   .badge-done { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #6060a0; background: #111118; border: 1px solid #2a2a3a; padding: 2px 6px; border-radius: 3px; }
+  .badge-ext { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #7c6af7; background: #14102a; border: 1px solid #2e2650; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+  .ext-toggle { background: #111118; border: 1px solid #2e2650; color: #6a5ad0; font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+  .ext-toggle:hover:not(:disabled) { border-color: #7c6af7; color: #9a8aff; }
+  .ext-toggle.on { background: #1a1438; color: #9a8aff; }
+  .ext-toggle:disabled { opacity: 0.5; cursor: wait; }
+  .reason-bubble { cursor: help; font-size: 13px; }
   .status-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 6px; border-radius: 3px; }
   .detail-header { display: flex; align-items: center; gap: 8px; }
   .dtitle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }

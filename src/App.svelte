@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { writable } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
@@ -10,15 +9,30 @@
     errorMessage, view, elapsedSeconds,
     todayStats,
   } from "./lib/stores";
-  import type { SessionState, ActivitySnapshot, NetworkConnection, AppNotification } from "./lib/types";
+  import type { SessionState, ActivitySnapshot, NetworkConnection, AppNotification, TimeLossPrompt } from "./lib/types";
   import Login from "./components/Login.svelte";
   import Dashboard from "./components/Dashboard.svelte";
   import Settings from "./components/Settings.svelte";
   import About from "./components/About.svelte";
   import AdminView from "./components/AdminView.svelte";
+  import Dialog from "./components/Dialog.svelte";
+  import { formatDuration } from "./lib/stores";
 
   let ticker: ReturnType<typeof setInterval>;
-  const notifications = writable<Array<{ id: string; title: string; body: string }>>([]);
+  let showTimeLossDialog = false;
+  let timeLossDeficit = 0;
+
+  async function onTimeLossContinue() {
+    showTimeLossDialog = false;
+    // Session is already marked extended by the backend; this confirms it
+    // (and re-applies it in case the earlier PocketBase PATCH failed).
+    try { await invoke("extend_session"); } catch (_) {}
+  }
+
+  async function onTimeLossClockOut() {
+    showTimeLossDialog = false;
+    try { await invoke("clock_out", { reason: null }); } catch (_) {}
+  }
 
   const notificationSoundPaths: Record<string, string> = {
     clock_in_reminder: "/audio/clock_in_reminder.mp3",
@@ -172,6 +186,11 @@
           );
           break;
         default:
+          // "info" and anything unrecognized (break start/end, general
+          // notices) — a soft two-note ping so no notification is ever silent.
+          [659.25, 880].forEach((freq, i) =>
+            playTone(ctx, freq, now + i * 0.14, 0.22, 0.26)
+          );
           break;
       }
     };
@@ -229,10 +248,16 @@
       session.set(state);
       if (state.status !== "idle" && state.clock_in) {
         const start = new Date(state.clock_in).getTime();
-        elapsedSeconds.set(
-          Math.floor((Date.now() - start) / 1000) - state.total_break_seconds
-        );
-        startTicker();
+        let elapsed =
+          Math.floor((Date.now() - start) / 1000) - state.total_break_seconds;
+        // An in-progress break isn't in total_break_seconds yet — exclude it.
+        if (state.status === "on_break" && state.break_start) {
+          elapsed -= Math.floor(
+            (Date.now() - new Date(state.break_start).getTime()) / 1000
+          );
+        }
+        elapsedSeconds.set(Math.max(0, elapsed));
+        if (state.status === "active") startTicker();
         view.set("dashboard");
       }
     }).catch(err => console.warn("Failed to get session state:", err));
@@ -244,6 +269,10 @@
         if (e.payload.status === "idle") {
           clearInterval(ticker);
           elapsedSeconds.set(0);
+        } else if (e.payload.status === "on_break") {
+          // Break time must not count as work time — freeze the ticker until
+          // the break ends (the "active" branch below re-syncs from clock_in).
+          clearInterval(ticker);
         } else if (e.payload.status === "active" && e.payload.clock_in) {
           const start = new Date(e.payload.clock_in).getTime();
           elapsedSeconds.set(
@@ -258,10 +287,14 @@
       listen<NetworkConnection[]>("network-update", (e) => {
         networkFeed.update((feed) => [...e.payload, ...feed].slice(0, 50));
       }),
+      listen<TimeLossPrompt>("time-loss-prompt", (e) => {
+        timeLossDeficit = e.payload.deficit_seconds;
+        showTimeLossDialog = true;
+      }),
       listen<AppNotification>("app-notification", async (e) => {
+        // Sound + system notification only — no in-app cards, they covered
+        // the UI and stacked up stale while the window was hidden in the tray.
         playNotificationSound(e.payload.kind);
-
-        // System notification (best-effort — permission API may not be available)
         try {
           let permission = await isPermissionGranted();
           if (!permission) {
@@ -272,16 +305,6 @@
             sendNotification({ title: e.payload.title, body: e.payload.body });
           }
         } catch (_) {}
-
-        // In-app card always shows regardless of system notification result
-        const id = Math.random().toString(36).slice(2);
-        notifications.update((items) => [
-          { id, title: e.payload.title, body: e.payload.body },
-          ...items,
-        ].slice(0, 5));
-        setTimeout(() => {
-          notifications.update((items) => items.filter((item) => item.id !== id));
-        }, 6000);
       })
     ];
 
@@ -395,14 +418,16 @@
     <div class="error-toast">{$errorMessage}</div>
   {/if}
 
-  <div class="notification-stack">
-    {#each $notifications as note (note.id)}
-      <div class="notification-card">
-        <div class="notification-title">{note.title}</div>
-        <div class="notification-body">{note.body}</div>
-      </div>
-    {/each}
-  </div>
+  <Dialog
+    open={showTimeLossDialog}
+    title="Office time is over"
+    body={`Your office time has finished, but you have ${formatDuration(timeLossDeficit)} of time loss today.\nDo you want to keep working now to complete your hours?`}
+    confirmLabel="Keep Working"
+    cancelLabel="Clock Out"
+    on:confirm={onTimeLossContinue}
+    on:cancel={onTimeLossClockOut}
+    on:dismiss={() => (showTimeLossDialog = false)}
+  />
 </main>
 
 <style>
@@ -436,43 +461,4 @@
     text-overflow: ellipsis;
   }
 
-  .notification-stack {
-    position: fixed;
-    top: 14px;
-    right: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    z-index: 110;
-    width: min(320px, calc(100vw - 28px));
-    pointer-events: none;
-  }
-
-  .notification-card {
-    background: rgba(10, 14, 24, 0.96);
-    border: 1px solid #2a3a55;
-    border-left: 3px solid #60a5fa;
-    border-radius: 12px;
-    padding: 10px 12px;
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
-    animation: slideIn 0.18s ease-out;
-  }
-
-  .notification-title {
-    font-size: 12px;
-    font-weight: 700;
-    color: #dbeafe;
-    margin-bottom: 4px;
-  }
-
-  .notification-body {
-    font-size: 12px;
-    color: #bfdbfe;
-    line-height: 1.45;
-  }
-
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(-6px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
 </style>

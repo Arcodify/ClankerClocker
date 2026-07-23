@@ -1,82 +1,20 @@
 /// <reference path="../pb_data/types.d.ts" />
 
-function parseDateTime(value) {
-    if (!value) {
-        return null;
-    }
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-}
-
 // Runs every minute. Closes any active/on_break session when:
 //   - the app has stopped reporting (offline) for 5+ minutes, or
 //   - the latest snapshot shows 5+ minutes of idle time, or
 //   - the company's scheduled clock-out time has passed (auto clock-out enabled).
 // This is the server-side safety net for when the desktop app isn't running
 // to perform its own client-side auto clock-out.
+//
+// Shared helpers live in pb_hooks/session_utils.js (require()'d below) so the
+// event-driven hooks in session_guards.pb.js apply identical close logic.
 cronAdd("auto_clockout_offline", "* * * * *", () => {
+    const utils = require(`${__hooks}/session_utils.js`);
     const OFFLINE_THRESHOLD_SECONDS = 5 * 60; // 5 minutes
-    const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // company runs on Nepal time (UTC+5:45)
-
-    function closeOpenBreaks(sessionId, endTime) {
-        let closedSeconds = 0;
-        let openBreaks = [];
-        try {
-            openBreaks = $app.findRecordsByFilter(
-                "breaks",
-                `session_id = '${sessionId}' && end_time = ''`,
-                "",
-                200,
-                0
-            );
-        } catch (e) {
-            console.error(`[auto_clockout] failed to fetch open breaks for ${sessionId}:`, e);
-            return 0;
-        }
-
-        for (const breakRecord of openBreaks) {
-            const start = parseDateTime(breakRecord.getString("start_time"));
-            if (!start) {
-                continue;
-            }
-            const secs = Math.max(0, Math.floor((endTime - start) / 1000));
-            closedSeconds += secs;
-            breakRecord.set("end_time", endTime.toISOString());
-            try {
-                $app.save(breakRecord);
-            } catch (e) {
-                console.error(`[auto_clockout] failed to close break ${breakRecord.id}:`, e);
-            }
-        }
-
-        return closedSeconds;
-    }
 
     const now = new Date();
-    const nepalNow = new Date(now.getTime() + NEPAL_OFFSET_MS);
-    const nowMinutes = nepalNow.getUTCHours() * 60 + nepalNow.getUTCMinutes();
-
-    // Look up the single company_config record for the clock-out policy.
-    let pastClockOutTime = false;
-    try {
-        const companyConfig = $app.findFirstRecordByFilter("company_config", "");
-        const rawClockOut = companyConfig ? companyConfig.getString("clock_out_time") : null;
-        const enabled = companyConfig ? companyConfig.getBool("auto_clock_out_enabled") : false;
-        let clockOutMinutes = null;
-        if (companyConfig && enabled) {
-            const match = /^(\d{1,2}):(\d{2})/.exec(rawClockOut || "");
-            if (match) {
-                clockOutMinutes = parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
-                pastClockOutTime = nowMinutes >= clockOutMinutes;
-            }
-        }
-        console.log(
-            `[auto_clockout] company_config: enabled=${enabled} clock_out_time=${JSON.stringify(rawClockOut)} ` +
-            `nowMinutes=${nowMinutes} clockOutMinutes=${clockOutMinutes} pastClockOutTime=${pastClockOutTime}`
-        );
-    } catch (e) {
-        console.error("[auto_clockout] failed to load company_config:", e);
-    }
+    const pastClockOutTime = utils.isPastScheduledClockOut(now);
 
     let activeSessions;
     try {
@@ -98,7 +36,13 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
         let sessionId = "?";
         try {
             sessionId = session.id;
-            const onBreak = session.getString("status") === "on_break";
+
+            // Trust an open break record over the session's status field: the
+            // client PATCHes status separately from creating the break, and a
+            // failed PATCH used to get people clocked out mid-break.
+            const onBreak =
+                session.getString("status") === "on_break" ||
+                utils.hasOpenBreak(sessionId);
 
             // While on a break, idle/offline is expected — only the scheduled
             // clock-out time can end the session early.
@@ -127,15 +71,15 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
 
                 if (!latestSnapshot) {
                     // Fall back to clock_in time if no snapshots at all
-                    const clockIn = session.getString("clock_in");
+                    const clockIn = utils.parseDateTime(session.getString("clock_in"));
                     if (clockIn) {
-                        const clockInDate = new Date(clockIn);
-                        secondsSinceLastPing = (now - clockInDate) / 1000;
+                        secondsSinceLastPing = (now - clockIn) / 1000;
                     }
                 } else {
-                    const ts = latestSnapshot.getString("timestamp");
-                    const lastSeen = new Date(ts);
-                    secondsSinceLastPing = (now - lastSeen) / 1000;
+                    const lastSeen = utils.parseDateTime(latestSnapshot.getString("timestamp"));
+                    if (lastSeen) {
+                        secondsSinceLastPing = (now - lastSeen) / 1000;
+                    }
                     idleSeconds = latestSnapshot.getInt("idle_seconds") || 0;
                 }
 
@@ -143,34 +87,33 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
                 idleTooLong = idleSeconds >= OFFLINE_THRESHOLD_SECONDS;
             }
 
+            // Scheduled clock-out does not apply to external staff (they work
+            // outside company hours) or to sessions the user explicitly chose
+            // to extend past the schedule to make up lost time.
+            let scheduledClose = pastClockOutTime;
+            if (scheduledClose && session.getBool("extended_past_schedule")) {
+                scheduledClose = false;
+            }
+            if (scheduledClose && utils.isExternalStaff(session.getString("user_id"))) {
+                scheduledClose = false;
+            }
+
             console.log(
                 `[auto_clockout] eval ${sessionId} status=${session.getString("status")} onBreak=${onBreak} ` +
                 `offlineTooLong=${offlineTooLong}(${Math.round(secondsSinceLastPing)}s) ` +
-                `idleTooLong=${idleTooLong}(${idleSeconds}s) pastClockOutTime=${pastClockOutTime}`
+                `idleTooLong=${idleTooLong}(${idleSeconds}s) scheduledClose=${scheduledClose}`
             );
 
-            // Clock out if any of:
-            // - the app stopped sending snapshots (offline 5+ minutes) — not while on break, or
-            // - the latest snapshot shows 5+ minutes of idle time — not while on break, or
-            // - the scheduled clock-out time has passed (auto clock-out enabled).
-            if (!offlineTooLong && !idleTooLong && !pastClockOutTime) {
+            if (!offlineTooLong && !idleTooLong && !scheduledClose) {
                 continue; // still on the clock
             }
 
-            // Auto clock-out: set clock_out to now and mark completed
-            const breakSecs = (session.getInt("total_break_seconds") || 0) + closeOpenBreaks(sessionId, now);
-            session.set("clock_out", now.toISOString());
-            session.set("status", "completed");
-            session.set("total_break_seconds", breakSecs);
-            $app.save(session);
             const reason = offlineTooLong
                 ? `offline for ${Math.round(secondsSinceLastPing)}s`
                 : idleTooLong
                     ? `idle for ${Math.round(idleSeconds)}s`
                     : "past scheduled clock-out time";
-            console.log(
-                `[auto_clockout] clocked out session ${sessionId} — ${reason}`
-            );
+            utils.closeSession(session, now, `[auto_clockout] ${reason}`);
         } catch (e) {
             console.error(`[auto_clockout] error processing session ${sessionId}:`, e);
         }

@@ -9,11 +9,18 @@
     errorMessage, authToken, userId, isAdmin, userName,
     todayStats,
   } from "../lib/stores";
-  import type { BreakConfig, LiveCounters } from "../lib/types";
+  import type { BreakConfig, LiveCounters, TodayStats } from "../lib/types";
+  import Dialog from "./Dialog.svelte";
 
   const dispatch = createEventDispatcher();
   let loading = false;
   let showBreakMenu = false;
+  let showEarlyOutDialog = false;
+  let earlyOutDeficit = 0;
+
+  $: deficitSeconds = $todayStats && $todayStats.required_seconds > 0
+    ? Math.max(0, $todayStats.required_seconds - $todayStats.total_work_seconds)
+    : 0;
 
   let breakConfigs: BreakConfig[] = [];
   let liveCounters: LiveCounters | null = null;
@@ -111,15 +118,43 @@
   }
 
   async function clockOut() {
+    // Clocking out with unfulfilled hours goes through a confirmation dialog
+    // where the employee can leave a reason for the admin.
     loading = true;
     try {
-      await invoke("clock_out");
+      const stats = await invoke<TodayStats>("get_today_stats");
+      todayStats.set(stats);
+      const deficit = stats.required_seconds > 0
+        ? Math.max(0, stats.required_seconds - stats.total_work_seconds)
+        : 0;
+      if (deficit >= 60) {
+        earlyOutDeficit = deficit;
+        showEarlyOutDialog = true;
+        return;
+      }
+    } catch (_) {
+      // Stats unavailable (offline) — fall through to a normal clock-out.
+    } finally {
+      loading = false;
+    }
+    await doClockOut(null);
+  }
+
+  async function doClockOut(reason: string | null) {
+    loading = true;
+    try {
+      await invoke("clock_out", { reason });
       setTimeout(refreshTodayStats, 500);
     } catch (e) {
       errorMessage.set(String(e));
     } finally {
       loading = false;
     }
+  }
+
+  function onEarlyOutConfirm(e: CustomEvent<{ reason: string }>) {
+    showEarlyOutDialog = false;
+    doClockOut(e.detail.reason || null);
   }
 
   async function startBreak(breakType: string, breakName: string) {
@@ -311,6 +346,14 @@
             <span class="ts-val">{formatDuration($todayStats.total_break_seconds)}</span>
             <span class="ts-lbl">break time</span>
           </div>
+          {#if $todayStats.required_seconds > 0}
+            <div class="today-stat">
+              <span class="ts-val" class:deficit={deficitSeconds > 0}>
+                {deficitSeconds > 0 ? formatDuration(deficitSeconds) : "0"}
+              </span>
+              <span class="ts-lbl">time loss</span>
+            </div>
+          {/if}
         </div>
       </div>
     {/if}
@@ -410,6 +453,20 @@
 {#if showBreakMenu}
   <div class="overlay" on:click={() => (showBreakMenu = false)} role="presentation"></div>
 {/if}
+
+<Dialog
+  open={showEarlyOutDialog}
+  title="Clocking out early"
+  body={`You still have ${formatDuration(earlyOutDeficit)} of time loss today — it will be recorded and visible to your admin.\nWant to add a reason? (optional)`}
+  confirmLabel="Clock Out"
+  cancelLabel="Stay Clocked In"
+  showInput={true}
+  inputPlaceholder="Reason (optional)…"
+  danger={true}
+  on:confirm={onEarlyOutConfirm}
+  on:cancel={() => (showEarlyOutDialog = false)}
+  on:dismiss={() => (showEarlyOutDialog = false)}
+/>
 
 <style>
   .dashboard { display: flex; flex-direction: column; height: 100vh; }
@@ -596,9 +653,11 @@
   /* Today grid */
   .today-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr 1fr;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
     gap: 4px;
   }
+  .ts-val.deficit { color: #f59e0b; }
   .today-stat {
     display: flex; flex-direction: column; align-items: center;
     background: #0e0e16; border-radius: 6px; padding: 8px 4px;

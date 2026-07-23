@@ -1,0 +1,123 @@
+/// <reference path="../pb_data/types.d.ts" />
+
+// Shared helpers for the auto-clockout cron (auto_clockout.pb.js) and the
+// event-driven guards (session_guards.pb.js). Plain .js (not .pb.js) so
+// PocketBase doesn't execute it directly — it's loaded via require().
+
+const NEPAL_OFFSET_MS = (5 * 60 + 45) * 60 * 1000; // company runs on Nepal time (UTC+5:45)
+
+function parseDateTime(value) {
+    if (!value) {
+        return null;
+    }
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// True when the company's scheduled clock-out time (auto clock-out enabled)
+// has passed for `now` in Nepal time.
+function isPastScheduledClockOut(now) {
+    try {
+        const companyConfig = $app.findFirstRecordByFilter("company_config", "");
+        if (!companyConfig || !companyConfig.getBool("auto_clock_out_enabled")) {
+            return false;
+        }
+        const match = /^(\d{1,2}):(\d{2})/.exec(companyConfig.getString("clock_out_time") || "");
+        if (!match) {
+            return false;
+        }
+        const clockOutMinutes = parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+        const nepalNow = new Date(now.getTime() + NEPAL_OFFSET_MS);
+        const nowMinutes = nepalNow.getUTCHours() * 60 + nepalNow.getUTCMinutes();
+        return nowMinutes >= clockOutMinutes;
+    } catch (e) {
+        console.error("[session_utils] failed to load company_config:", e);
+        return false;
+    }
+}
+
+// External staff work outside company hours — scheduled clock-out never
+// applies to them. Unknown/missing users are treated as regular staff.
+function isExternalStaff(userId) {
+    if (!userId) {
+        return false;
+    }
+    try {
+        const user = $app.findRecordById("users", userId);
+        return user ? user.getBool("is_external_staff") : false;
+    } catch (e) {
+        return false;
+    }
+}
+
+// A session with an open break record is on break no matter what its status
+// field says (the client sets status in a separate, fallible PATCH).
+function hasOpenBreak(sessionId) {
+    try {
+        const openBreaks = $app.findRecordsByFilter(
+            "breaks",
+            `session_id = '${sessionId}' && end_time = ''`,
+            "",
+            1,
+            0
+        );
+        return openBreaks.length > 0;
+    } catch (e) {
+        return false;
+    }
+}
+
+function closeOpenBreaks(sessionId, endTime) {
+    let closedSeconds = 0;
+    let openBreaks = [];
+    try {
+        openBreaks = $app.findRecordsByFilter(
+            "breaks",
+            `session_id = '${sessionId}' && end_time = ''`,
+            "",
+            200,
+            0
+        );
+    } catch (e) {
+        console.error(`[session_utils] failed to fetch open breaks for ${sessionId}:`, e);
+        return 0;
+    }
+
+    for (const breakRecord of openBreaks) {
+        const start = parseDateTime(breakRecord.getString("start_time"));
+        if (!start) {
+            continue;
+        }
+        closedSeconds += Math.max(0, Math.floor((endTime - start) / 1000));
+        breakRecord.set("end_time", endTime.toISOString());
+        try {
+            $app.save(breakRecord);
+        } catch (e) {
+            console.error(`[session_utils] failed to close break ${breakRecord.id}:`, e);
+        }
+    }
+
+    return closedSeconds;
+}
+
+// Closes a work_sessions record: ends open breaks, sets clock_out, and marks
+// it completed. `logPrefix` identifies the caller in the server log.
+function closeSession(session, endTime, logPrefix) {
+    const breakSecs =
+        (session.getInt("total_break_seconds") || 0) +
+        closeOpenBreaks(session.id, endTime);
+    session.set("clock_out", endTime.toISOString());
+    session.set("status", "completed");
+    session.set("total_break_seconds", breakSecs);
+    $app.save(session);
+    console.log(`${logPrefix} — closed session ${session.id}`);
+}
+
+module.exports = {
+    parseDateTime,
+    isPastScheduledClockOut,
+    isExternalStaff,
+    hasOpenBreak,
+    closeOpenBreaks,
+    closeSession,
+};

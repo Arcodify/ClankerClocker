@@ -35,6 +35,14 @@ export interface TodayStats {
   break_count: number;
   total_break_seconds: number;
   total_net_loss_seconds: number;
+  /** Scheduled work seconds for today (clock_in_time → clock_out_time); 0 for external staff. */
+  required_seconds: number;
+}
+
+/** Payload of the "time-loss-prompt" event emitted at scheduled clock-out
+ *  when the user still has a work-hour deficit. */
+export interface TimeLossPrompt {
+  deficit_seconds: number;
 }
 
 export interface TodaySessionBreakdown {
@@ -68,6 +76,7 @@ export interface TeamMember {
   active_app: string;
   today_total_work_seconds: number;
   today_total_break_seconds: number;
+  is_external_staff: boolean;
 }
 
 export interface AppSettings {
@@ -112,6 +121,7 @@ export interface UserInfo {
   name: string;
   email: string;
   is_admin: boolean;
+  is_external_staff: boolean;
 }
 
 export interface SessionRecord {
@@ -127,6 +137,7 @@ export interface SessionRecord {
   net_seconds: number;
   net_loss_seconds: number;
   break_count: number;
+  early_clockout_reason: string;
 }
 
 export interface UserSummary {
