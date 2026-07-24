@@ -14,7 +14,11 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
     const OFFLINE_THRESHOLD_SECONDS = 5 * 60; // 5 minutes
 
     const now = new Date();
-    const pastClockOutTime = utils.isPastScheduledClockOut(now);
+    // 5-minute grace after the scheduled time: the client fires its
+    // "keep working?" prompt ~1–2 minutes in and PATCHes
+    // extended_past_schedule — closing at minute zero raced that PATCH
+    // and kicked out everyone trying to make up their time loss.
+    const pastClockOutTime = utils.isPastScheduledClockOut(now, 5);
 
     let activeSessions;
     try {

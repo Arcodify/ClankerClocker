@@ -74,6 +74,7 @@ export interface TeamMember {
   total_break_seconds: number;
   break_count: number;
   active_app: string;
+  active_window_title: string;
   today_total_work_seconds: number;
   today_total_break_seconds: number;
   is_external_staff: boolean;
@@ -187,6 +188,8 @@ export interface ActivityReport {
   total_clicks: number;
   idle_pct: number;
   top_apps: AppUsage[];
+  /** Same shape as top_apps but keyed by window title. */
+  top_windows: AppUsage[];
   session_count: number;
   total_snapshot_count: number;
 }

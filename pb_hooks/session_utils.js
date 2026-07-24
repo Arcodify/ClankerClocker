@@ -15,8 +15,11 @@ function parseDateTime(value) {
 }
 
 // True when the company's scheduled clock-out time (auto clock-out enabled)
-// has passed for `now` in Nepal time.
-function isPastScheduledClockOut(now) {
+// has passed for `now` in Nepal time. `graceMinutes` delays the answer past
+// the scheduled time — the desktop client needs a window to show its
+// "keep working to complete your hours?" prompt and mark the session
+// extended_past_schedule before the server closes it.
+function isPastScheduledClockOut(now, graceMinutes) {
     try {
         const companyConfig = $app.findFirstRecordByFilter("company_config", "");
         if (!companyConfig || !companyConfig.getBool("auto_clock_out_enabled")) {
@@ -29,7 +32,7 @@ function isPastScheduledClockOut(now) {
         const clockOutMinutes = parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
         const nepalNow = new Date(now.getTime() + NEPAL_OFFSET_MS);
         const nowMinutes = nepalNow.getUTCHours() * 60 + nepalNow.getUTCMinutes();
-        return nowMinutes >= clockOutMinutes;
+        return nowMinutes >= clockOutMinutes + (graceMinutes || 0);
     } catch (e) {
         console.error("[session_utils] failed to load company_config:", e);
         return false;

@@ -76,7 +76,9 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
 
-            let icon_bytes = include_bytes!("../icons/icon.png");
+            // Gray = idle; commands::update_tray swaps in the green/yellow
+            // variants on clock-in and break transitions.
+            let icon_bytes = include_bytes!("../icons/tray-idle.png");
             let tray_icon = tauri::image::Image::from_bytes(icon_bytes).expect("invalid tray icon");
 
             TrayIconBuilder::with_id("main")
@@ -506,6 +508,14 @@ impl Background {
             return;
         }
 
+        // An employee who still owes hours gets the "keep working?" prompt
+        // right away — it closes nothing, so it needs no warning or grace,
+        // and waiting here used to lose the race against the server cron.
+        if cfg.auto_clock_out_enabled && self.maybe_prompt_time_loss(now_npt, cfg).await {
+            self.scheduled_clockout_warned_at = None;
+            return;
+        }
+
         // Warning notification fires once per day (key-gated)
         if self.notify_once(
             reminder_key(now_npt, "clock_out"),
@@ -531,13 +541,6 @@ impl Background {
             .map(|warned_at| (now - warned_at).num_seconds() >= self.debug.clockout_grace_seconds)
             .unwrap_or(true);
         if !grace_elapsed {
-            return;
-        }
-
-        // If the employee still owes hours today, offer to keep working
-        // instead of force-closing the session (asked at most once per day).
-        if self.maybe_prompt_time_loss(now_npt, cfg).await {
-            self.scheduled_clockout_warned_at = None;
             return;
         }
 

@@ -389,6 +389,18 @@ pub async fn clock_in(
     };
     let now = Utc::now();
 
+    // Clocking in after the scheduled clock-out time is always deliberate
+    // off-hours work (making up time loss, or external staff). Mark the
+    // session extended from the start so the server cron's scheduled close
+    // doesn't end it a minute later.
+    let past_schedule = {
+        let cfg = state.config.lock();
+        let now_npt = now.with_timezone(&crate::nepal_offset());
+        crate::schedule_datetime(now_npt.date_naive(), &cfg.clock_out_time)
+            .map(|due| now_npt >= due)
+            .unwrap_or(false)
+    };
+
     // If offline (no token/url), generate a local session ID
     let session_id = if pb_token.is_empty() || pb_url.is_empty() {
         format!("local-{}", uuid::Uuid::new_v4())
@@ -396,9 +408,14 @@ pub async fn clock_in(
         let pb = PocketBase::new(pb_url, pb_token);
         // Close any stale active sessions for this user first (multi-machine protection)
         pb.close_stale_sessions(&user_id, &now).await.ok();
-        pb.create_session(&user_id, &now, &display_name, &user_email)
+        let sid = pb
+            .create_session(&user_id, &now, &display_name, &user_email)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if past_schedule {
+            pb.set_session_extended(&sid, true).await.ok();
+        }
+        sid
     };
 
     {
@@ -410,6 +427,7 @@ pub async fn clock_in(
         sess.break_name = None;
         sess.total_break_seconds = 0;
         sess.break_count = 0;
+        sess.extended_past_schedule = past_schedule;
         let s = sess.clone();
         drop(sess);
         state.auto_break_history.lock().clear();
@@ -1001,11 +1019,23 @@ fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
 
 fn update_tray(app: &tauri::AppHandle, status: &str) {
     if let Some(tray) = app.tray_by_id("main") {
-        let tooltip = match status {
-            "active" => "ClankerClocker — Clocked In",
-            "break" => "ClankerClocker — On Break",
-            _ => "ClankerClocker — Idle",
+        let (tooltip, icon_bytes): (&str, &[u8]) = match status {
+            "active" => (
+                "ClankerClocker — Clocked In",
+                include_bytes!("../icons/tray-active.png"),
+            ),
+            "break" => (
+                "ClankerClocker — On Break",
+                include_bytes!("../icons/tray-break.png"),
+            ),
+            _ => (
+                "ClankerClocker — Idle",
+                include_bytes!("../icons/tray-idle.png"),
+            ),
         };
         let _ = tray.set_tooltip(Some(tooltip));
+        if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
+            let _ = tray.set_icon(Some(icon));
+        }
     }
 }

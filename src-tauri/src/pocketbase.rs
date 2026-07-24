@@ -606,7 +606,7 @@ impl PocketBase {
 
                 let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
                 let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
-                let active_app = active_app_res.unwrap_or_default();
+                let (active_app, active_window_title) = active_app_res.unwrap_or_default();
                 let (today_total_work_seconds, today_total_break_seconds) = today_res
                     .map(|s| (s.total_work_seconds, s.total_break_seconds))
                     .unwrap_or((0, 0));
@@ -623,6 +623,7 @@ impl PocketBase {
                         total_break_seconds,
                         break_count,
                         active_app,
+                        active_window_title,
                         today_total_work_seconds,
                         today_total_break_seconds,
                         is_external_staff,
@@ -1046,6 +1047,7 @@ impl PocketBase {
         let mut total_snaps: u32 = 0;
         let mut idle_snaps: u32 = 0;
         let mut app_seconds: HashMap<String, i64> = HashMap::new();
+        let mut window_seconds: HashMap<String, i64> = HashMap::new();
 
         for chunk in session_ids.chunks(10) {
             let f = chunk
@@ -1068,6 +1070,10 @@ impl PocketBase {
                         let app = item["active_app"].as_str().unwrap_or("").to_string();
                         if !app.is_empty() {
                             *app_seconds.entry(app).or_insert(0) += 30;
+                        }
+                        let win = item["active_window"].as_str().unwrap_or("").to_string();
+                        if !win.is_empty() {
+                            *window_seconds.entry(win).or_insert(0) += 30;
                         }
                     }
                 }
@@ -1095,17 +1101,37 @@ impl PocketBase {
         top_apps.sort_by(|a, b| b.seconds.cmp(&a.seconds));
         top_apps.truncate(10);
 
+        // Window titles are far higher-cardinality than app names (every
+        // browser tab is its own title), so keep a larger top-N.
+        let total_window: i64 = window_seconds.values().sum();
+        let mut top_windows: Vec<crate::session::AppUsage> = window_seconds
+            .into_iter()
+            .map(|(app, seconds)| crate::session::AppUsage {
+                pct: if total_window > 0 {
+                    seconds as f32 / total_window as f32 * 100.0
+                } else {
+                    0.0
+                },
+                app,
+                seconds,
+            })
+            .collect();
+        top_windows.sort_by(|a, b| b.seconds.cmp(&a.seconds));
+        top_windows.truncate(15);
+
         Ok(crate::session::ActivityReport {
             total_keystrokes,
             total_clicks,
             idle_pct,
             top_apps,
+            top_windows,
             session_count,
             total_snapshot_count: total_snaps,
         })
     }
 
-    async fn get_latest_active_app(&self, session_id: &str) -> Result<String> {
+    /// Latest (active_app, active_window title) reported for a session.
+    async fn get_latest_active_app(&self, session_id: &str) -> Result<(String, String)> {
         let url = format!(
             "{}/api/collections/activity_snapshots/records?filter={}&sort=-timestamp&perPage=1",
             self.base_url,
@@ -1118,12 +1144,13 @@ impl PocketBase {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Ok(String::new());
+            return Ok((String::new(), String::new()));
         }
         let data: Value = resp.json().await?;
-        Ok(data["items"][0]["active_app"]
-            .as_str()
-            .unwrap_or("")
-            .to_string())
+        let item = &data["items"][0];
+        Ok((
+            item["active_app"].as_str().unwrap_or("").to_string(),
+            item["active_window"].as_str().unwrap_or("").to_string(),
+        ))
     }
 }

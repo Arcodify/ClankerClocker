@@ -542,10 +542,31 @@ fn macos_active_window() -> (String, String) {
 
     let out = out.trim();
     if let Some((app, win)) = out.split_once('|') {
-        (app.trim().to_string(), win.trim().to_string())
-    } else {
-        (out.to_string(), String::new())
+        return (app.trim().to_string(), win.trim().to_string());
     }
+    if !out.is_empty() {
+        return (out.to_string(), String::new());
+    }
+
+    // System Events needs the Automation permission; when it's denied the
+    // script errors and stdout is empty. lsappinfo needs no permission and
+    // still identifies the frontmost app (no window title), which keeps
+    // activity data and native-client conference detection working.
+    let out = Command::new("sh")
+        .args(["-c", "lsappinfo info -only name $(lsappinfo front)"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    // Output looks like: "LSDisplayName"="Safari"
+    let app = out
+        .split('=')
+        .next_back()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    (app, String::new())
 }
 
 #[cfg(target_os = "windows")]

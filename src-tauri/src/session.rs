@@ -183,6 +183,9 @@ pub struct TeamMember {
     pub total_break_seconds: i64,
     pub break_count: u32,
     pub active_app: String,
+    /// Title of the most recently reported active window.
+    #[serde(default)]
+    pub active_window_title: String,
     /// Totals across all of this member's sessions today (Nepal time), including the current one.
     pub today_total_work_seconds: i64,
     pub today_total_break_seconds: i64,
@@ -325,6 +328,9 @@ pub struct ActivityReport {
     pub total_clicks: u64,
     pub idle_pct: f32,
     pub top_apps: Vec<AppUsage>,
+    /// Same shape as top_apps but keyed by window title.
+    #[serde(default)]
+    pub top_windows: Vec<AppUsage>,
     pub session_count: u32,
     pub total_snapshot_count: u32,
 }

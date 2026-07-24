@@ -329,20 +329,22 @@
   $: liveNetPaged = liveFilteredNet.slice(liveNetPage * LIVE_NET_PER_PAGE, (liveNetPage + 1) * LIVE_NET_PER_PAGE);
   $: liveNetPages = Math.max(1, Math.ceil(liveFilteredNet.length / LIVE_NET_PER_PAGE));
 
-  $: liveAppUsage = computeAppUsage(liveSnapshots);
+  $: liveAppUsage = computeAppUsage(liveSnapshots, s => s.active_app);
+  $: liveWindowUsage = computeAppUsage(liveSnapshots, s => s.active_window, 12);
 
-  function computeAppUsage(snaps: ActivitySnapshot[]) {
+  function computeAppUsage(snaps: ActivitySnapshot[], key: (s: ActivitySnapshot) => string, limit = 8) {
     const counts: Record<string, number> = {};
     for (const s of snaps) {
-      if (s.idle_seconds < 30 && s.active_app) {
-        counts[s.active_app] = (counts[s.active_app] ?? 0) + 30;
+      const k = key(s);
+      if (s.idle_seconds < 30 && k) {
+        counts[k] = (counts[k] ?? 0) + 30;
       }
     }
     const total = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
     return Object.entries(counts)
       .map(([app, seconds]) => ({ app, seconds, pct: Math.round(seconds / total * 100) }))
       .sort((a, b) => b.seconds - a.seconds)
-      .slice(0, 8);
+      .slice(0, limit);
   }
 
   // ── Download helpers ───────────────────────────────────────────────────────
@@ -433,12 +435,18 @@
     if (!activityReport) return;
     const hdrs = ["App","Seconds","Percentage"];
     const rows = activityReport.top_apps.map(a => [a.app, String(a.seconds), a.pct.toFixed(1) + "%"].map(csvEscape).join(","));
+    const winHdrs = ["Window Title","Seconds","Percentage"];
+    const winRows = (activityReport.top_windows ?? []).map(a => [a.app, String(a.seconds), a.pct.toFixed(1) + "%"].map(csvEscape).join(","));
     const meta = [
       `"Total Keystrokes","${activityReport.total_keystrokes}"`,
       `"Total Clicks","${activityReport.total_clicks}"`,
       `"Idle %","${activityReport.idle_pct.toFixed(1)}%"`,
     ];
-    triggerDownload(`activity_${fromDate}_to_${toDate}.csv`, [...meta, "", hdrs.join(","), ...rows].join("\n"), "text/csv");
+    triggerDownload(
+      `activity_${fromDate}_to_${toDate}.csv`,
+      [...meta, "", hdrs.join(","), ...rows, "", winHdrs.join(","), ...winRows].join("\n"),
+      "text/csv",
+    );
   }
 
   function downloadActivityJSON() {
@@ -515,8 +523,8 @@
         <div class="live-header">
           <span class="live-count">{teamMembers.length} online</span>
           <button class="csv-btn" on:click={() => {
-            const hdrs = ["Name","Email","Status","Since","Today Work","Today Break"];
-            const rows = teamMembers.map(m => [m.user_name,m.user_email,m.status,nptDateTime(m.clock_in),hhmm(m.today_total_work_seconds),hhmm(m.today_total_break_seconds)].map(csvEscape).join(","));
+            const hdrs = ["Name","Email","Status","Since","Today Work","Today Break","Active App","Window"];
+            const rows = teamMembers.map(m => [m.user_name,m.user_email,m.status,nptDateTime(m.clock_in),hhmm(m.today_total_work_seconds),hhmm(m.today_total_break_seconds),m.active_app,m.active_window_title].map(csvEscape).join(","));
             triggerDownload("live_" + nepalToday() + ".csv", [hdrs.join(","), ...rows].join("\n"), "text/csv");
           }}>CSV</button>
         </div>
@@ -545,7 +553,12 @@
               <div class="ms"><span class="msv">{m.break_count}</span><span class="msl">Breaks</span></div>
             </div>
             {#if m.active_app}
-              <div class="mapp"><span class="adot">●</span>{m.active_app}</div>
+              <div class="mapp">
+                <span class="adot">●</span>{m.active_app}
+                {#if m.active_window_title && m.active_window_title !== m.active_app}
+                  <span class="mwin" title={m.active_window_title}>— {m.active_window_title}</span>
+                {/if}
+              </div>
             {/if}
           </button>
         {/each}
@@ -606,6 +619,20 @@
               </div>
             {/if}
           </div>
+          {#if liveWindowUsage.length > 0}
+            <div class="card">
+              <div class="card-title">Window Titles</div>
+              <div class="app-list">
+                {#each liveWindowUsage as a}
+                  <div class="arow">
+                    <span class="aname wide" title={a.app}>{a.app}</span>
+                    <div class="bwrap"><div class="bfill" style="width:{a.pct}%"></div></div>
+                    <span class="adur">{hhmm(a.seconds)}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
         {:else if liveDetailTab === "network"}
           <div class="card">
             <div class="card-title">Connections <input class="nfilter" bind:value={liveNetFilter} placeholder="filter host/proc…" /></div>
@@ -877,6 +904,21 @@
             </div>
           {/if}
         </div>
+        <!-- Window titles -->
+        {#if (activityReport.top_windows ?? []).length > 0}
+          <div class="card">
+            <div class="card-title">Window Titles (active time only)</div>
+            <div class="app-list">
+              {#each activityReport.top_windows as a}
+                <div class="arow">
+                  <span class="aname wide" title={a.app}>{a.app}</span>
+                  <div class="bwrap"><div class="bfill" style="width:{Math.max(a.pct, 1)}%"></div></div>
+                  <span class="adur wide">{hhmm(a.seconds)} ({a.pct.toFixed(1)}%)</span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
       {/if}
 
     <!-- ════════ NETWORK TAB ══════════════════════════════════════════════════ -->
@@ -1062,6 +1104,7 @@
   .msv { font-size: 14px; font-weight: 700; color: #c0c0d8; font-variant-numeric: tabular-nums; }
   .msl { font-size: 9px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; }
   .mapp { font-size: 11px; color: #5a5a72; border-top: 1px solid #1a1a24; padding-top: 7px; display: flex; align-items: center; gap: 6px; }
+  .mwin { color: #44445a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .adot { color: #22c55e; font-size: 8px; }
   .badge-active { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #22c55e; background: #0a1f0a; border: 1px solid #1a3a1a; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
   .badge-break { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #f59e0b; background: #1c1a10; border: 1px solid #3a2e00; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }

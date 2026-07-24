@@ -119,23 +119,24 @@
 
   async function clockOut() {
     // Clocking out with unfulfilled hours goes through a confirmation dialog
-    // where the employee can leave a reason for the admin.
-    loading = true;
-    try {
-      const stats = await invoke<TodayStats>("get_today_stats");
-      todayStats.set(stats);
-      const deficit = stats.required_seconds > 0
-        ? Math.max(0, stats.required_seconds - stats.total_work_seconds)
-        : 0;
-      if (deficit >= 60) {
-        earlyOutDeficit = deficit;
-        showEarlyOutDialog = true;
-        return;
-      }
-    } catch (_) {
-      // Stats unavailable (offline) — fall through to a normal clock-out.
-    } finally {
-      loading = false;
+    // where the employee can leave a reason for the admin. The deficit comes
+    // from the periodically-refreshed store — fetching fresh stats here made
+    // the dialog take up to a minute to appear on a slow connection.
+    if (deficitSeconds >= 60) {
+      earlyOutDeficit = deficitSeconds;
+      showEarlyOutDialog = true;
+      invoke<TodayStats>("get_today_stats")
+        .then((stats) => {
+          todayStats.set(stats);
+          const fresh = stats.required_seconds > 0
+            ? Math.max(0, stats.required_seconds - stats.total_work_seconds)
+            : 0;
+          if (showEarlyOutDialog && fresh >= 60) {
+            earlyOutDeficit = fresh;
+          }
+        })
+        .catch(() => {});
+      return;
     }
     await doClockOut(null);
   }
@@ -346,15 +347,14 @@
             <span class="ts-val">{formatDuration($todayStats.total_break_seconds)}</span>
             <span class="ts-lbl">break time</span>
           </div>
-          {#if $todayStats.required_seconds > 0}
-            <div class="today-stat">
-              <span class="ts-val" class:deficit={deficitSeconds > 0}>
-                {deficitSeconds > 0 ? formatDuration(deficitSeconds) : "0"}
-              </span>
-              <span class="ts-lbl">time loss</span>
-            </div>
-          {/if}
         </div>
+        {#if $todayStats.required_seconds > 0}
+          <div class="timeloss-row" class:deficit={deficitSeconds > 0}>
+            <span class="tl-lbl">Time loss today</span>
+            <span class="tl-val">{deficitSeconds > 0 ? formatDuration(deficitSeconds) : "none"}</span>
+            <span class="tl-req">of {formatDuration($todayStats.required_seconds)} required</span>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -657,11 +657,25 @@
     grid-auto-columns: 1fr;
     gap: 4px;
   }
-  .ts-val.deficit { color: #f59e0b; }
   .today-stat {
     display: flex; flex-direction: column; align-items: center;
     background: #0e0e16; border-radius: 6px; padding: 8px 4px;
   }
+  /* Time loss gets its own full-width line under the stat grid */
+  .timeloss-row {
+    display: flex; align-items: baseline; gap: 8px;
+    margin-top: 6px; padding: 8px 10px;
+    background: #0e0e16; border-radius: 6px;
+    border-left: 3px solid #2a2a3a;
+  }
+  .timeloss-row.deficit {
+    background: rgba(245, 158, 11, 0.07);
+    border-left-color: #f59e0b;
+  }
+  .tl-lbl { font-size: 10px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; }
+  .tl-val { font-size: 15px; font-weight: 600; color: #8a8aa0; font-variant-numeric: tabular-nums; margin-left: auto; }
+  .timeloss-row.deficit .tl-val { color: #f59e0b; }
+  .tl-req { font-size: 10px; color: #4a4a62; }
   .ts-val { font-size: 18px; font-weight: 600; color: #e0e0ec; font-variant-numeric: tabular-nums; }
   .ts-lbl { font-size: 9px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }
 
