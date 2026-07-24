@@ -101,6 +101,21 @@ pub struct BreakConfig {
     pub auto_end_time: Option<String>,
 }
 
+/// Total seconds of scheduled auto-break windows (auto_start → auto_end).
+/// Configs without auto-start or with unparsable times contribute nothing.
+pub fn scheduled_break_seconds(configs: &[BreakConfig]) -> i64 {
+    let parse = |v: &str| chrono::NaiveTime::parse_from_str(v, "%H:%M").ok();
+    configs
+        .iter()
+        .filter(|c| c.auto_start_enabled)
+        .filter_map(|c| {
+            let start = parse(c.auto_start_time.as_deref()?)?;
+            let end = parse(c.auto_end_time.as_deref()?)?;
+            Some((end - start).num_seconds().max(0))
+        })
+        .sum()
+}
+
 impl BreakConfig {
     pub fn defaults() -> Vec<Self> {
         vec![
@@ -145,8 +160,9 @@ pub struct TodayStats {
     pub break_count: u32,
     pub total_break_seconds: i64,
     pub total_net_loss_seconds: i64,
-    /// Scheduled work seconds for today (clock_in_time → clock_out_time).
-    /// 0 for external staff, who have no fixed schedule.
+    /// Required work seconds for today: schedule span (clock_in_time →
+    /// clock_out_time) minus scheduled auto-break windows. 0 for external
+    /// staff, who have no fixed schedule.
     #[serde(default)]
     pub required_seconds: i64,
 }
@@ -244,6 +260,12 @@ impl AppConfig {
             _ => 0,
         }
     }
+
+    /// Required work seconds per day: the schedule span minus scheduled
+    /// auto-break windows (breaks don't count toward required hours).
+    pub fn required_work_seconds(&self, breaks: &[BreakConfig]) -> i64 {
+        (self.required_seconds() - scheduled_break_seconds(breaks)).max(0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +308,10 @@ pub struct UserSummary {
     pub total_break_seconds: i64,
     pub total_gross_seconds: i64,
     pub total_net_loss_seconds: i64,
+    /// Sum over days present of max(0, required work seconds − day's net
+    /// work). 0 for external staff, who have no required hours.
+    #[serde(default)]
+    pub total_time_loss_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

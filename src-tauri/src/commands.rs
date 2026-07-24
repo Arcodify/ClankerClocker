@@ -536,11 +536,21 @@ pub async fn end_break(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
         .map(|_| ())
 }
 
+/// Required daily work seconds (schedule span minus scheduled auto-breaks),
+/// for admin views that compute per-day time loss client-side.
+#[tauri::command]
+pub fn get_required_seconds(state: State<'_, AppState>) -> i64 {
+    let cfg = state.config.lock();
+    let breaks = state.break_configs.lock();
+    cfg.required_work_seconds(&breaks)
+}
+
 #[tauri::command]
 pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, String> {
     let (pb_url, pb_token, user_id, required_seconds, sess_elapsed, sess_break_secs, sess_break_count) = {
         let cfg = state.config.lock();
         let sess = state.session.lock();
+        let breaks = state.break_configs.lock();
         let elapsed = sess
             .clock_in
             .map(|ci| (Utc::now() - ci).num_seconds())
@@ -549,7 +559,7 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             cfg.pb_url.clone(),
             cfg.pb_token.clone(),
             cfg.user_id.clone(),
-            cfg.required_seconds(),
+            cfg.required_work_seconds(&breaks),
             elapsed,
             sess.total_break_seconds,
             sess.break_count,
@@ -914,22 +924,38 @@ pub async fn get_time_summary(
     to_date: String,
     user_id: Option<String>,
 ) -> Result<Vec<UserSummary>, String> {
-    let (pb_url, pb_token) = {
+    let (pb_url, pb_token, required_seconds) = {
         let c = state.config.lock();
-        (c.pb_url.clone(), c.pb_token.clone())
+        let breaks = state.break_configs.lock();
+        (
+            c.pb_url.clone(),
+            c.pb_token.clone(),
+            c.required_work_seconds(&breaks),
+        )
     };
     if pb_url.is_empty() || pb_token.is_empty() {
         return Err("Not connected to PocketBase".into());
     }
     let (from, to) = nepal_range_from_dates(&from_date, &to_date);
-    let sessions = PocketBase::new(pb_url, pb_token)
+    let pb = PocketBase::new(pb_url, pb_token);
+    let sessions = pb
         .get_sessions_in_range(&from, &to, user_id.as_deref())
         .await
         .map_err(|e| e.to_string())?;
+    // External staff have no required hours, so no time loss.
+    let external_ids: HashSet<String> = pb
+        .get_all_users()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.is_external_staff)
+        .map(|u| u.id)
+        .collect();
 
     let nepal = chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).unwrap();
     let mut by_user: HashMap<String, UserSummary> = HashMap::new();
     let mut user_days: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut day_net: HashMap<(String, String), i64> = HashMap::new();
 
     for s in &sessions {
         let e = by_user.entry(s.user_id.clone()).or_insert_with(|| UserSummary {
@@ -942,6 +968,7 @@ pub async fn get_time_summary(
             total_break_seconds: 0,
             total_gross_seconds: 0,
             total_net_loss_seconds: 0,
+            total_time_loss_seconds: 0,
         });
         e.session_count += 1;
         e.total_work_seconds += s.net_seconds;
@@ -953,10 +980,18 @@ pub async fn get_time_summary(
             .with_timezone(&nepal)
             .format("%Y-%m-%d")
             .to_string();
-        user_days.entry(s.user_id.clone()).or_default().insert(date);
+        user_days.entry(s.user_id.clone()).or_default().insert(date.clone());
+        *day_net.entry((s.user_id.clone(), date)).or_insert(0) += s.net_seconds;
     }
     for (uid, summary) in by_user.iter_mut() {
         summary.days_present = user_days.get(uid).map(|d| d.len() as u32).unwrap_or(0);
+        if required_seconds > 0 && !external_ids.contains(uid) {
+            summary.total_time_loss_seconds = day_net
+                .iter()
+                .filter(|((id, _), _)| id == uid)
+                .map(|(_, net)| (required_seconds - net).max(0))
+                .sum();
+        }
     }
     let mut result: Vec<UserSummary> = by_user.into_values().collect();
     result.sort_by(|a, b| a.user_name.cmp(&b.user_name));

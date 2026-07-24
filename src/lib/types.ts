@@ -151,6 +151,8 @@ export interface UserSummary {
   total_break_seconds: number;
   total_gross_seconds: number;
   total_net_loss_seconds: number;
+  /** Sum over days present of max(0, required − day net work); 0 for external staff. */
+  total_time_loss_seconds: number;
 }
 
 export interface NetworkStat {

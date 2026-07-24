@@ -243,6 +243,7 @@ pub fn run() {
             commands::start_break,
             commands::end_break,
             commands::get_today_stats,
+            commands::get_required_seconds,
             commands::get_team_status,
             commands::get_break_configs,
             commands::get_user_activity,
@@ -562,7 +563,7 @@ impl Background {
     /// decides; declining just clocks out, ignoring it falls back to the
     /// 5-minute idle auto-clockout. Returns true when the prompt fired.
     async fn maybe_prompt_time_loss(&self, now_npt: DateTime<FixedOffset>, cfg: &AppConfig) -> bool {
-        let required = cfg.required_seconds();
+        let required = cfg.required_work_seconds(&self.break_configs.lock());
         if required <= 0 {
             return false;
         }
