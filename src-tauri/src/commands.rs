@@ -9,7 +9,7 @@ use crate::AppState;
 use chrono::Utc;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 
 fn nepal_range_from_dates(
@@ -1009,6 +1009,9 @@ pub async fn get_activity_report(
 }
 
 fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.audio.play("info");
+    }
     let payload = AppNotification {
         title: title.to_string(),
         body: body.to_string(),

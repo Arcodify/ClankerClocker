@@ -37,6 +37,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
+            libasound2-dev \
             pkg-config
 
       - name: Setup Node

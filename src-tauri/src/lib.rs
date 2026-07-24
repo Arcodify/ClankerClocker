@@ -1,3 +1,4 @@
+mod audio;
 mod commands;
 pub mod config;
 mod db;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub auto_break_history: Arc<Mutex<HashSet<String>>>,
     pub scheduled_notification_history: Arc<Mutex<HashSet<String>>>,
     pub pending_auto_breaks: Arc<Mutex<HashSet<String>>>,
+    pub audio: Arc<audio::AudioPlayer>,
 }
 
 pub fn run() {
@@ -142,20 +144,8 @@ pub fn run() {
                     }
                 });
 
-                // WebKitGTK suspends all audio until a user gesture, so
-                // notification sounds emitted while the app sits in the tray
-                // would be silent. Notifications are the whole point — allow
-                // playback without a gesture.
-                #[cfg(target_os = "linux")]
-                win.with_webview(|webview| {
-                    use webkit2gtk::{SettingsExt, WebViewExt};
-                    if let Some(settings) = webview.inner().settings() {
-                        settings.set_media_playback_requires_user_gesture(false);
-                    }
-                })
-                .ok();
-
                 win.show().ok();
+                win.set_focus().ok();
             }
 
             app.manage(AppState {
@@ -170,6 +160,7 @@ pub fn run() {
                 auto_break_history: auto_break_history.clone(),
                 scheduled_notification_history: scheduled_notification_history.clone(),
                 pending_auto_breaks: pending_auto_breaks.clone(),
+                audio: Arc::new(audio::AudioPlayer::new()),
             });
 
             // Start input monitor thread (rdev blocks its OS thread)
@@ -354,6 +345,9 @@ impl Background {
     }
 
     fn notify(&self, kind: &str, title: &str, body: &str) {
+        if let Some(state) = self.app.try_state::<AppState>() {
+            state.audio.play(kind);
+        }
         self.app
             .emit(
                 "app-notification",
