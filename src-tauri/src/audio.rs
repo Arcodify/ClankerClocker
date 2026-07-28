@@ -1,46 +1,49 @@
 use std::io::Cursor;
+use std::time::Duration;
 
-use parking_lot::Mutex;
-use rodio::{DeviceSinkBuilder, Decoder, MixerDeviceSink};
+use rodio::{DeviceSinkBuilder, Decoder, Source};
 
 /// Plays notification sounds directly through the OS audio device (ALSA/CoreAudio/WASAPI
 /// via rodio+cpal), bypassing the webview entirely. This avoids depending on WebKitGTK's
 /// GStreamer-backed <audio> playback, which the AppImage bundle doesn't ship working
 /// GStreamer plugins for, and sidesteps browser autoplay-gesture policies on every OS.
-pub struct AudioPlayer {
-    sink: Mutex<Option<MixerDeviceSink>>,
-}
+pub struct AudioPlayer;
 
 impl AudioPlayer {
     pub fn new() -> Self {
-        // Deliberately not `DeviceSinkBuilder::open_default_sink()`: on failure it falls
-        // back to scanning every enumerated ALSA device, including raw hardware PCMs
-        // (hw:CARD=...) that bypass PipeWire/PulseAudio's shared routing. Grabbing one of
-        // those and holding it open for the app's lifetime locks the sound card exclusively,
-        // breaking audio for every other app on the system. Only ever try the "default"
-        // (server-routed) device; if that fails, disable notification sounds instead of
-        // seizing hardware out from under the rest of the system.
-        let sink = match DeviceSinkBuilder::from_default_device().and_then(|b| b.open_stream()) {
-            Ok(sink) => Some(sink),
-            Err(err) => {
-                log::warn!("notification audio disabled: could not open output device: {err}");
-                None
-            }
-        };
-        Self {
-            sink: Mutex::new(sink),
-        }
+        Self
     }
 
     pub fn play(&self, kind: &str) {
-        let sink = self.sink.lock();
-        let Some(sink) = sink.as_ref() else {
-            return;
-        };
-        match Decoder::try_from(Cursor::new(sound_bytes(kind))) {
-            Ok(source) => sink.mixer().add(source),
-            Err(err) => log::warn!("failed to decode notification sound {kind:?}: {err}"),
-        }
+        let kind = kind.to_string();
+        // Open the output device only for the few seconds it takes to play a notification,
+        // then drop it. On some Linux setups ALSA's "default" PCM still resolves to a raw
+        // hardware device instead of routing through PipeWire/PulseAudio (e.g. when the
+        // distro's pipewire-alsa glue isn't installed), which locks the sound card for
+        // every other app while held open. Holding it only for the clip's duration turns
+        // that failure mode into a brief blip instead of requiring the user to quit the
+        // app and restart their audio server. Deliberately not
+        // `DeviceSinkBuilder::open_default_sink()`: on failure it falls back to scanning
+        // every enumerated ALSA device, including raw hardware PCMs, which we never want
+        // to pick automatically.
+        std::thread::spawn(move || {
+            let sink = match DeviceSinkBuilder::from_default_device().and_then(|b| b.open_stream())
+            {
+                Ok(sink) => sink,
+                Err(err) => {
+                    log::warn!("notification audio disabled: could not open output device: {err}");
+                    return;
+                }
+            };
+            match Decoder::try_from(Cursor::new(sound_bytes(&kind))) {
+                Ok(source) => {
+                    let duration = source.total_duration().unwrap_or(Duration::from_secs(5));
+                    sink.mixer().add(source);
+                    std::thread::sleep(duration + Duration::from_millis(300));
+                }
+                Err(err) => log::warn!("failed to decode notification sound {kind:?}: {err}"),
+            }
+        });
     }
 }
 
