@@ -13,7 +13,14 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new() -> Self {
-        let sink = match DeviceSinkBuilder::open_default_sink() {
+        // Deliberately not `DeviceSinkBuilder::open_default_sink()`: on failure it falls
+        // back to scanning every enumerated ALSA device, including raw hardware PCMs
+        // (hw:CARD=...) that bypass PipeWire/PulseAudio's shared routing. Grabbing one of
+        // those and holding it open for the app's lifetime locks the sound card exclusively,
+        // breaking audio for every other app on the system. Only ever try the "default"
+        // (server-routed) device; if that fails, disable notification sounds instead of
+        // seizing hardware out from under the rest of the system.
+        let sink = match DeviceSinkBuilder::from_default_device().and_then(|b| b.open_stream()) {
             Ok(sink) => Some(sink),
             Err(err) => {
                 log::warn!("notification audio disabled: could not open output device: {err}");

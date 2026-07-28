@@ -57,6 +57,18 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Pre-download WiX (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $wixDir = "$env:LOCALAPPDATA\tauri\WixTools314"
+          New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
+          curl.exe -L --retry 10 --retry-delay 5 --retry-all-errors `
+            -o wix314-binaries.zip `
+            https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+          Expand-Archive -Path wix314-binaries.zip -DestinationPath $wixDir -Force
+          Remove-Item wix314-binaries.zip
+
       - name: Install JS deps
         run: npm install
 
@@ -70,5 +82,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "ClankerClocker ${{ github.ref_name }}"
           releaseBody: "See release notes."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
