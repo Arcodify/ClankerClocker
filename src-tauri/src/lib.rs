@@ -556,12 +556,40 @@ impl Background {
         self.scheduled_clockout_warned_at = None;
     }
 
+    /// Lower bound on today's *current-session* worked seconds, computed
+    /// purely from this client's own in-memory session state — no network
+    /// round trip, so it can't be wrong for the reasons a PocketBase read
+    /// can be (transient WAN blip, partial response, replication lag).
+    /// If the user clocked in/out more than once today the true total is
+    /// only ever higher than this (earlier sessions add on top), so it's
+    /// safe to use as a floor for whatever the server reports.
+    fn local_worked_seconds_floor(&self, now: DateTime<Utc>) -> i64 {
+        let sess = self.session.lock();
+        let Some(clock_in) = sess.clock_in else {
+            return 0;
+        };
+        let gross = (now - clock_in).num_seconds().max(0);
+        let mut breaks = sess.total_break_seconds;
+        if sess.status == SessionStatus::OnBreak {
+            if let Some(break_start) = sess.break_start {
+                breaks += (now - break_start).num_seconds().max(0);
+            }
+        }
+        (gross - breaks).max(0)
+    }
+
     /// At scheduled clock-out with a work-hour deficit, emits the
     /// "time-loss-prompt" event so the UI can ask whether to keep working.
     /// The session is pre-marked as extended (locally and on PocketBase) so
     /// neither this loop nor the server cron closes it while the user
     /// decides; declining just clocks out, ignoring it falls back to the
     /// 5-minute idle auto-clockout. Returns true when the prompt fired.
+    ///
+    /// The deficit hinges on one network read (`get_today_stats`) — a single
+    /// bad response used to be able to show an employee an alarming, wrong
+    /// "you're hours behind" prompt. This retries once on a hard failure and,
+    /// on success, clamps the server's number up to `local_worked_seconds_floor`
+    /// so a transient undercount can never manufacture a phantom deficit.
     async fn maybe_prompt_time_loss(&self, now_npt: DateTime<FixedOffset>, cfg: &AppConfig) -> bool {
         let required = cfg.required_work_seconds(&self.break_configs.lock());
         if required <= 0 {
@@ -576,9 +604,37 @@ impl Background {
         if user_id.is_empty() {
             return false;
         }
-        let Ok(stats) = pb.get_today_stats(&user_id).await else {
-            return false; // offline — fall through to the normal auto clock-out
+
+        let mut stats = match pb.get_today_stats(&user_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "maybe_prompt_time_loss: get_today_stats failed ({e}), retrying once"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match pb.get_today_stats(&user_id).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!(
+                            "maybe_prompt_time_loss: retry failed too ({e}), skipping prompt"
+                        );
+                        return false; // offline — fall through to the normal auto clock-out
+                    }
+                }
+            }
         };
+
+        let now_utc = now_npt.with_timezone(&Utc);
+        let local_floor = self.local_worked_seconds_floor(now_utc);
+        if stats.total_work_seconds < local_floor {
+            log::warn!(
+                "maybe_prompt_time_loss: server total_work_seconds={} undershoots this session's own floor={} — trusting the local figure",
+                stats.total_work_seconds,
+                local_floor
+            );
+            stats.total_work_seconds = local_floor;
+        }
+
         let deficit = required - stats.total_work_seconds;
         if deficit < 60 {
             return false;
@@ -873,6 +929,8 @@ fn find_pending_auto_break(
 /// - `CLANKER_DEBUG_IDLE_WARNING_SECONDS` / `CLANKER_DEBUG_IDLE_CLOCKOUT_SECONDS`
 /// - `CLANKER_DEBUG_CLOCKOUT_GRACE_SECONDS`
 /// - `CLANKER_DEBUG_BREAK_AT` (HH:MM, NPT) adds a synthetic auto-start break
+/// - `CLANKER_DEBUG_BREAK_DURATION_MINUTES` (default 1) planned length of that break —
+///   drives the "your break has ended" notification timing
 #[derive(Debug)]
 struct DebugOverrides {
     clock_in_time: Option<String>,
@@ -882,6 +940,7 @@ struct DebugOverrides {
     idle_clockout_seconds: u64,
     clockout_grace_seconds: i64,
     break_at: Option<String>,
+    break_duration_minutes: u32,
 }
 
 impl DebugOverrides {
@@ -901,6 +960,7 @@ impl DebugOverrides {
             idle_clockout_seconds: env_num("CLANKER_DEBUG_IDLE_CLOCKOUT_SECONDS", 5 * 60),
             clockout_grace_seconds: env_num("CLANKER_DEBUG_CLOCKOUT_GRACE_SECONDS", 20),
             break_at: std::env::var("CLANKER_DEBUG_BREAK_AT").ok(),
+            break_duration_minutes: env_num("CLANKER_DEBUG_BREAK_DURATION_MINUTES", 1),
         };
         if overrides.clock_in_time.is_some()
             || overrides.clock_out_time.is_some()
@@ -922,6 +982,7 @@ impl DebugOverrides {
             idle_clockout_seconds: 5 * 60,
             clockout_grace_seconds: 20,
             break_at: None,
+            break_duration_minutes: 1,
         }
     }
 
@@ -943,7 +1004,7 @@ impl DebugOverrides {
                 id: "debug-break".into(),
                 name: "Debug Break".into(),
                 type_key: "debug".into(),
-                duration_minutes: 1,
+                duration_minutes: self.break_duration_minutes,
                 sort_order: 99,
                 auto_start_enabled: true,
                 auto_start_time: Some(hhmm.clone()),

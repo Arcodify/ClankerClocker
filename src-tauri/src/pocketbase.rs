@@ -1015,14 +1015,12 @@ impl PocketBase {
             .map(|(name, count)| crate::session::NetworkStat { name, count })
             .collect();
         top_hosts.sort_by(|a, b| b.count.cmp(&a.count));
-        top_hosts.truncate(20);
 
         let mut top_processes: Vec<crate::session::NetworkStat> = proc_counts
             .into_iter()
             .map(|(name, count)| crate::session::NetworkStat { name, count })
             .collect();
         top_processes.sort_by(|a, b| b.count.cmp(&a.count));
-        top_processes.truncate(10);
 
         Ok(crate::session::NetworkReport {
             records: all_records,
@@ -1099,10 +1097,7 @@ impl PocketBase {
             })
             .collect();
         top_apps.sort_by(|a, b| b.seconds.cmp(&a.seconds));
-        top_apps.truncate(10);
 
-        // Window titles are far higher-cardinality than app names (every
-        // browser tab is its own title), so keep a larger top-N.
         let total_window: i64 = window_seconds.values().sum();
         let mut top_windows: Vec<crate::session::AppUsage> = window_seconds
             .into_iter()
@@ -1117,7 +1112,6 @@ impl PocketBase {
             })
             .collect();
         top_windows.sort_by(|a, b| b.seconds.cmp(&a.seconds));
-        top_windows.truncate(15);
 
         Ok(crate::session::ActivityReport {
             total_keystrokes,

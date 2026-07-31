@@ -43,17 +43,18 @@
       console.log("Restored session:", state.status);
       session.set(state);
       if (state.status !== "idle" && state.clock_in) {
-        const start = new Date(state.clock_in).getTime();
-        let elapsed =
-          Math.floor((Date.now() - start) / 1000) - state.total_break_seconds;
-        // An in-progress break isn't in total_break_seconds yet — exclude it.
         if (state.status === "on_break" && state.break_start) {
-          elapsed -= Math.floor(
-            (Date.now() - new Date(state.break_start).getTime()) / 1000
+          const breakStart = new Date(state.break_start).getTime();
+          elapsedSeconds.set(
+            Math.max(0, Math.floor((Date.now() - breakStart) / 1000))
           );
+        } else {
+          const start = new Date(state.clock_in).getTime();
+          const elapsed =
+            Math.floor((Date.now() - start) / 1000) - state.total_break_seconds;
+          elapsedSeconds.set(Math.max(0, elapsed));
         }
-        elapsedSeconds.set(Math.max(0, elapsed));
-        if (state.status === "active") startTicker();
+        if (state.status === "active" || state.status === "on_break") startTicker();
         view.set("dashboard");
       }
     }).catch(err => console.warn("Failed to get session state:", err));
@@ -65,10 +66,13 @@
         if (e.payload.status === "idle") {
           clearInterval(ticker);
           elapsedSeconds.set(0);
-        } else if (e.payload.status === "on_break") {
-          // Break time must not count as work time — freeze the ticker until
-          // the break ends (the "active" branch below re-syncs from clock_in).
-          clearInterval(ticker);
+        } else if (e.payload.status === "on_break" && e.payload.break_start) {
+          // The timer shows the current break's running duration (not counted
+          // toward work time); the "active" branch below re-syncs from
+          // clock_in once the break ends.
+          const start = new Date(e.payload.break_start).getTime();
+          elapsedSeconds.set(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+          startTicker();
         } else if (e.payload.status === "active" && e.payload.clock_in) {
           const start = new Date(e.payload.clock_in).getTime();
           elapsedSeconds.set(

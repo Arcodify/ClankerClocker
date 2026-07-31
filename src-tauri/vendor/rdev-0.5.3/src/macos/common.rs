@@ -89,7 +89,7 @@ pub type QCallback = unsafe extern "C" fn(
 pub unsafe fn convert(
     _type: CGEventType,
     cg_event: &CGEvent,
-    keyboard_state: &mut Keyboard,
+    _keyboard_state: &mut Keyboard,
 ) -> Option<Event> {
     let option_type = match _type {
         CGEventType::LeftMouseDown => Some(EventType::ButtonPress(Button::Left)),
@@ -133,19 +133,17 @@ pub unsafe fn convert(
         _ => None,
     };
     if let Some(event_type) = option_type {
-        let name = match event_type {
-            EventType::KeyPress(_) => {
-                let code =
-                    cg_event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32;
-                let flags = cg_event.get_flags();
-                keyboard_state.create_string_for_key(code, flags)
-            }
-            _ => None,
-        };
+        // Deliberately not calling keyboard_state.create_string_for_key() here.
+        // It calls TISCopyCurrentKeyboardInputSource/TSMGetInputSourceProperty,
+        // which newer macOS versions (observed on 26.x) assert must run on the
+        // main thread via dispatch_assert_queue. This callback runs on the
+        // dedicated "input-monitor" CFRunLoop thread, so calling it crashes the
+        // app (EXC_BREAKPOINT / dispatch_assert_queue_fail). We only need
+        // event_type here, never the translated character, so skip it entirely.
         return Some(Event {
             event_type,
             time: SystemTime::now(),
-            name,
+            name: None,
         });
     }
     None

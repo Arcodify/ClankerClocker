@@ -101,14 +101,20 @@
   let activityReport: ActivityReport | null = null;
   let activityLoading = false;
   let activityUserId = "";
+  let activityAppsPage = 0;
+  let activityWindowsPage = 0;
+  const ACT_PER_PAGE = 10;
 
   // ── Network tab ────────────────────────────────────────────────────────────
   let networkReport: NetworkReport | null = null;
   let networkLoading = false;
   let networkFilter = "";
   let networkPage = 0;
+  let networkHostsPage = 0;
+  let networkProcsPage = 0;
   let networkViewMode: "stats" | "table" = "stats";
   const NET_PER_PAGE = 25;
+  const NET_STAT_PER_PAGE = 15;
 
   function setPreset(p: typeof filterPreset) {
     filterPreset = p;
@@ -226,6 +232,8 @@
     const uid = activityUserId || selectedUserId;
     if (!uid) { activityReport = null; return; }
     activityLoading = true;
+    activityAppsPage = 0;
+    activityWindowsPage = 0;
     try {
       activityReport = await invoke<ActivityReport>("get_activity_report", {
         fromDate, toDate, userId: uid,
@@ -237,6 +245,8 @@
   async function loadNetwork() {
     networkLoading = true;
     networkPage = 0;
+    networkHostsPage = 0;
+    networkProcsPage = 0;
     try {
       networkReport = await invoke<NetworkReport>("get_network_report", {
         fromDate, toDate, userId: selectedUserId || null,
@@ -252,6 +262,10 @@
     networkReport = null;
     attendancePage = 0;
     networkPage = 0;
+    activityAppsPage = 0;
+    activityWindowsPage = 0;
+    networkHostsPage = 0;
+    networkProcsPage = 0;
     if (activeTab === "attendance") loadAttendance();
     else if (activeTab === "summary") loadSummary();
     else if (activeTab === "activity") loadActivity();
@@ -332,6 +346,22 @@
   });
   $: netPages = Math.max(1, Math.ceil(filteredNetRecords.length / NET_PER_PAGE));
   $: pagedNetRecords = filteredNetRecords.slice(networkPage * NET_PER_PAGE, (networkPage + 1) * NET_PER_PAGE);
+
+  $: activityApps = activityReport?.top_apps ?? [];
+  $: activityAppsPages = Math.max(1, Math.ceil(activityApps.length / ACT_PER_PAGE));
+  $: pagedActivityApps = activityApps.slice(activityAppsPage * ACT_PER_PAGE, (activityAppsPage + 1) * ACT_PER_PAGE);
+
+  $: activityWindows = activityReport?.top_windows ?? [];
+  $: activityWindowsPages = Math.max(1, Math.ceil(activityWindows.length / ACT_PER_PAGE));
+  $: pagedActivityWindows = activityWindows.slice(activityWindowsPage * ACT_PER_PAGE, (activityWindowsPage + 1) * ACT_PER_PAGE);
+
+  $: netHosts = networkReport?.top_hosts ?? [];
+  $: netHostsPages = Math.max(1, Math.ceil(netHosts.length / NET_STAT_PER_PAGE));
+  $: pagedNetHosts = netHosts.slice(networkHostsPage * NET_STAT_PER_PAGE, (networkHostsPage + 1) * NET_STAT_PER_PAGE);
+
+  $: netProcs = networkReport?.top_processes ?? [];
+  $: netProcsPages = Math.max(1, Math.ceil(netProcs.length / NET_STAT_PER_PAGE));
+  $: pagedNetProcs = netProcs.slice(networkProcsPage * NET_STAT_PER_PAGE, (networkProcsPage + 1) * NET_STAT_PER_PAGE);
 
   $: liveFilteredNet = liveNetConns.filter(r => {
     if (!liveNetFilter) return true;
@@ -901,12 +931,12 @@
         </div>
         <!-- App usage -->
         <div class="card">
-          <div class="card-title">App Usage (active time only)</div>
-          {#if activityReport.top_apps.length === 0}
+          <div class="card-title">App Usage (active time only) <span class="csub">({activityApps.length} total)</span></div>
+          {#if activityApps.length === 0}
             <div class="nodata">No app usage data.</div>
           {:else}
             <div class="app-list">
-              {#each activityReport.top_apps as a}
+              {#each pagedActivityApps as a}
                 <div class="arow">
                   <span class="aname wide" title={a.app}>{a.app}</span>
                   <div class="bwrap"><div class="bfill" style="width:{Math.max(a.pct, 1)}%"></div></div>
@@ -914,14 +944,21 @@
                 </div>
               {/each}
             </div>
+            {#if activityAppsPages > 1}
+              <div class="pagination">
+                <button class="pg-btn" disabled={activityAppsPage === 0} on:click={() => activityAppsPage--}>‹</button>
+                <span class="pg-info">{activityAppsPage + 1} / {activityAppsPages} (showing {pagedActivityApps.length} of {activityApps.length})</span>
+                <button class="pg-btn" disabled={activityAppsPage >= activityAppsPages - 1} on:click={() => activityAppsPage++}>›</button>
+              </div>
+            {/if}
           {/if}
         </div>
         <!-- Window titles -->
-        {#if (activityReport.top_windows ?? []).length > 0}
+        {#if activityWindows.length > 0}
           <div class="card">
-            <div class="card-title">Window Titles (active time only)</div>
+            <div class="card-title">Window Titles (active time only) <span class="csub">({activityWindows.length} total)</span></div>
             <div class="app-list">
-              {#each activityReport.top_windows as a}
+              {#each pagedActivityWindows as a}
                 <div class="arow">
                   <span class="aname wide" title={a.app}>{a.app}</span>
                   <div class="bwrap"><div class="bfill" style="width:{Math.max(a.pct, 1)}%"></div></div>
@@ -929,6 +966,13 @@
                 </div>
               {/each}
             </div>
+            {#if activityWindowsPages > 1}
+              <div class="pagination">
+                <button class="pg-btn" disabled={activityWindowsPage === 0} on:click={() => activityWindowsPage--}>‹</button>
+                <span class="pg-info">{activityWindowsPage + 1} / {activityWindowsPages} (showing {pagedActivityWindows.length} of {activityWindows.length})</span>
+                <button class="pg-btn" disabled={activityWindowsPage >= activityWindowsPages - 1} on:click={() => activityWindowsPage++}>›</button>
+              </div>
+            {/if}
           </div>
         {/if}
       {/if}
@@ -954,13 +998,13 @@
       {:else if networkViewMode === "stats"}
         <!-- Top hosts -->
         <div class="card">
-          <div class="card-title">Top Domains / Hosts <span class="csub">({networkReport.top_hosts.length} unique)</span></div>
-          {#if networkReport.top_hosts.length === 0}
+          <div class="card-title">Top Domains / Hosts <span class="csub">({netHosts.length} unique)</span></div>
+          {#if netHosts.length === 0}
             <div class="nodata">No connections recorded.</div>
           {:else}
-            {@const maxHostCount = networkReport.top_hosts[0]?.count ?? 1}
+            {@const maxHostCount = netHosts[0]?.count ?? 1}
             <div class="app-list">
-              {#each networkReport.top_hosts.slice(0, 15) as h}
+              {#each pagedNetHosts as h}
                 <div class="arow">
                   <span class="aname net-host" title={h.name}>{h.name}</span>
                   <div class="bwrap"><div class="bfill dbfill" style="width:{Math.round(h.count / maxHostCount * 100)}%"></div></div>
@@ -968,17 +1012,24 @@
                 </div>
               {/each}
             </div>
+            {#if netHostsPages > 1}
+              <div class="pagination">
+                <button class="pg-btn" disabled={networkHostsPage === 0} on:click={() => networkHostsPage--}>‹</button>
+                <span class="pg-info">{networkHostsPage + 1} / {netHostsPages} (showing {pagedNetHosts.length} of {netHosts.length})</span>
+                <button class="pg-btn" disabled={networkHostsPage >= netHostsPages - 1} on:click={() => networkHostsPage++}>›</button>
+              </div>
+            {/if}
           {/if}
         </div>
         <!-- Top processes -->
         <div class="card">
-          <div class="card-title">Top Processes</div>
-          {#if networkReport.top_processes.length === 0}
+          <div class="card-title">Top Processes <span class="csub">({netProcs.length} unique)</span></div>
+          {#if netProcs.length === 0}
             <div class="nodata">No process data.</div>
           {:else}
-            {@const maxProcCount = networkReport.top_processes[0]?.count ?? 1}
+            {@const maxProcCount = netProcs[0]?.count ?? 1}
             <div class="app-list">
-              {#each networkReport.top_processes as p}
+              {#each pagedNetProcs as p}
                 <div class="arow">
                   <span class="aname" title={p.name}>{p.name}</span>
                   <div class="bwrap"><div class="bfill" style="width:{Math.round(p.count / maxProcCount * 100)}%"></div></div>
@@ -986,6 +1037,13 @@
                 </div>
               {/each}
             </div>
+            {#if netProcsPages > 1}
+              <div class="pagination">
+                <button class="pg-btn" disabled={networkProcsPage === 0} on:click={() => networkProcsPage--}>‹</button>
+                <span class="pg-info">{networkProcsPage + 1} / {netProcsPages} (showing {pagedNetProcs.length} of {netProcs.length})</span>
+                <button class="pg-btn" disabled={networkProcsPage >= netProcsPages - 1} on:click={() => networkProcsPage++}>›</button>
+              </div>
+            {/if}
           {/if}
         </div>
       {:else}
