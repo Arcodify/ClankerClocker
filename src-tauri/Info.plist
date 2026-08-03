@@ -8,5 +8,11 @@
          only receive events while ClankerClocker itself was focused. -->
     <key>NSAppSleepDisabled</key>
     <true/>
+    <!-- Required for the AppleScript "tell application System Events" call in
+         monitor/window.rs that reads the active app/window title. Without this
+         key, macOS silently denies the Apple Event (no permission prompt ever
+         appears) instead of asking the user for Automation access. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>ClankerClocker reads the name of the app and window you have focused, to track your work activity.</string>
 </dict>
 </plist>
