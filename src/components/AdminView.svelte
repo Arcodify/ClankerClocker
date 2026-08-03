@@ -140,7 +140,11 @@
       await win.setSize(new LogicalSize(ADMIN_W, ADMIN_H));
     } catch (_) {}
     await loadUsers();
-    try { requiredSeconds = await invoke<number>("get_required_seconds"); } catch (_) {}
+    try {
+      requiredSeconds = await invoke<number>("get_required_seconds");
+    } catch (e) {
+      console.error("Failed to load required seconds; Time Loss will read as 0:", e);
+    }
     await refreshLive();
     liveInterval = setInterval(refreshLive, 30_000);
   });

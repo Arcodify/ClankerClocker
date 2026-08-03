@@ -492,7 +492,7 @@ impl Background {
             let sess = self.session.lock();
             (sess.status.clone(), sess.extended_past_schedule)
         };
-        if status == SessionStatus::Idle || extended {
+        if status == SessionStatus::Idle {
             return;
         }
         let Some(clock_out_due) = schedule_datetime(now_npt.date_naive(), &cfg.clock_out_time)
@@ -506,17 +506,23 @@ impl Background {
         // An employee who still owes hours gets the "keep working?" prompt
         // right away — it closes nothing, so it needs no warning or grace,
         // and waiting here used to lose the race against the server cron.
-        if cfg.auto_clock_out_enabled && self.maybe_prompt_time_loss(now_npt, cfg).await {
+        // Skipped once already extended: they've already answered this
+        // today, and re-prompting would just re-show the same dialog.
+        if !extended && cfg.auto_clock_out_enabled && self.maybe_prompt_time_loss(now_npt, cfg).await
+        {
             self.scheduled_clockout_warned_at = None;
             return;
         }
 
-        // Warning notification fires once per day (key-gated)
+        // Warning notification fires once per day (key-gated). This still
+        // fires for an extended session — "extended" only means auto
+        // clock-out is skipped below, not that the employee should stop
+        // being told their scheduled time has passed.
         if self.notify_once(
             reminder_key(now_npt, "clock_out"),
             "scheduled_clockout_warning",
             "your clockout time is here",
-            if cfg.auto_clock_out_enabled {
+            if cfg.auto_clock_out_enabled && !extended {
                 "your clockout time is here. you'll be auto clocked out shortly."
             } else {
                 "your clockout time is here"
@@ -525,7 +531,7 @@ impl Background {
             self.scheduled_clockout_warned_at = Some(now);
         }
 
-        if !cfg.auto_clock_out_enabled {
+        if extended || !cfg.auto_clock_out_enabled {
             return;
         }
 

@@ -5,7 +5,7 @@
   import { listen } from "@tauri-apps/api/event";
   import {
     session, latestActivity, networkFeed,
-    formattedElapsed, formatDuration,
+    formattedElapsed, formatDuration, elapsedSeconds,
     errorMessage, authToken, userId, isAdmin, userName,
     todayStats,
   } from "../lib/stores";
@@ -17,12 +17,43 @@
   let showBreakMenu = false;
   let showEarlyOutDialog = false;
   let earlyOutDeficit = 0;
+  let breakConfigs: BreakConfig[] = [];
+
+  // Net work seconds of the *current* open session: ticks live while active,
+  // frozen at the moment a break starts (the "active" branch below re-syncs
+  // it from clock_in once the break ends). $elapsedSeconds is a single
+  // shared 1Hz tick driven from App.svelte and reused for both meanings.
+  $: sessionWorkSeconds = $session.status === "active"
+    ? $elapsedSeconds
+    : $session.status === "on_break" && $session.break_start && $session.clock_in
+      ? Math.max(0, Math.floor(
+          (new Date($session.break_start).getTime() - new Date($session.clock_in).getTime()) / 1000
+        ) - $session.total_break_seconds)
+      : 0;
+
+  // Today's totals baseline (from the last refreshTodayStats() fetch, which
+  // only reflects sessions closed *before* the current one started) plus the
+  // live current-session delta, so these tick in real time without repolling.
+  $: totalTimeTodaySeconds = ($todayStats?.total_work_seconds ?? 0) + sessionWorkSeconds;
+
+  $: currentBreakElapsed = $session.status === "on_break" ? $elapsedSeconds : 0;
+  $: totalBreakTodaySeconds = ($todayStats?.total_break_seconds ?? 0)
+    + $session.total_break_seconds + currentBreakElapsed;
+
+  // Current break countdown: counts down from the break type's configured
+  // duration; breaks with no configured duration (e.g. "Other") have no
+  // target, so the timer falls back to counting up instead.
+  $: activeBreakConfig = $session.status === "on_break" && $session.break_name
+    ? breakConfigs.find((bc) => bc.name === $session.break_name) ?? null
+    : null;
+  $: breakDurationSeconds = (activeBreakConfig?.duration_minutes ?? 0) * 60;
+  $: breakRemaining = breakDurationSeconds > 0 ? breakDurationSeconds - currentBreakElapsed : null;
+  $: breakOvertime = breakRemaining !== null && breakRemaining < 0;
 
   $: deficitSeconds = $todayStats && $todayStats.required_seconds > 0
-    ? Math.max(0, $todayStats.required_seconds - $todayStats.total_work_seconds)
+    ? Math.max(0, $todayStats.required_seconds - totalTimeTodaySeconds)
     : 0;
 
-  let breakConfigs: BreakConfig[] = [];
   let liveCounters: LiveCounters | null = null;
   let unlisten: (() => void) | null = null;
 
@@ -187,6 +218,15 @@
     return n.toLocaleString();
   }
 
+  function formatClock(totalSeconds: number): string {
+    const sign = totalSeconds < 0 ? "-" : "";
+    const abs = Math.abs(totalSeconds);
+    const h = Math.floor(abs / 3600);
+    const m = Math.floor((abs % 3600) / 60).toString().padStart(2, "0");
+    const s = (abs % 60).toString().padStart(2, "0");
+    return h > 0 ? `${sign}${h}:${m}:${s}` : `${sign}${m}:${s}`;
+  }
+
   async function installUpdate() {
     if (!updateVersion || updateInstalling) return;
     updateInstalling = true;
@@ -278,12 +318,23 @@
   <div class="body">
     <!-- Timer -->
     <div class="timer-block">
-      <div class="timer">{$formattedElapsed}</div>
-      {#if $session.status === "on_break" && $session.break_start}
-        <div class="timer-sub break-sub">On Break</div>
-      {:else if breakSubtitle && $session.status !== "idle"}
-        <div class="timer-sub">{breakSubtitle}</div>
-      {:else if $session.status === "idle"}
+      {#if $session.status === "on_break"}
+        <div class="timer" class:overtime={breakOvertime}>
+          {breakRemaining !== null ? formatClock(breakRemaining) : $formattedElapsed}
+        </div>
+        <div class="timer-sub break-sub">
+          {#if breakDurationSeconds > 0}
+            {breakOvertime ? `${$session.break_name} · over time` : `${$session.break_name} remaining`}
+          {:else}
+            On Break · {$session.break_name}
+          {/if}
+        </div>
+        <div class="timer-session-paused">Session paused at {formatClock(sessionWorkSeconds)}</div>
+      {:else if $session.status === "active"}
+        <div class="timer">{$formattedElapsed}</div>
+        <div class="timer-sub">{breakSubtitle || "This session"}</div>
+      {:else}
+        <div class="timer">{$formattedElapsed}</div>
         <div class="timer-sub">Ready to clock in</div>
       {/if}
     </div>
@@ -336,7 +387,7 @@
             <span class="ts-lbl">session{$todayStats.session_count !== 1 ? "s" : ""}</span>
           </div>
           <div class="today-stat">
-            <span class="ts-val">{formatDuration($todayStats.total_work_seconds)}</span>
+            <span class="ts-val">{formatDuration(totalTimeTodaySeconds)}</span>
             <span class="ts-lbl">worked</span>
           </div>
           <div class="today-stat">
@@ -344,7 +395,7 @@
             <span class="ts-lbl">break{$todayStats.break_count !== 1 ? "s" : ""}</span>
           </div>
           <div class="today-stat">
-            <span class="ts-val">{formatDuration($todayStats.total_break_seconds)}</span>
+            <span class="ts-val">{formatDuration(totalBreakTodaySeconds)}</span>
             <span class="ts-lbl">break time</span>
           </div>
         </div>
@@ -562,6 +613,8 @@
   }
   .timer-sub { margin-top: 6px; font-size: 12px; color: #5a5a72; }
   .break-sub { color: #f59e0b; }
+  .timer.overtime { color: #ef4444; }
+  .timer-session-paused { margin-top: 3px; font-size: 10px; color: #3a3a52; }
 
   .warn-banner {
     margin: 0 12px;

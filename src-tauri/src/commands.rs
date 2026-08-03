@@ -537,7 +537,9 @@ pub async fn end_break(app: tauri::AppHandle, state: State<'_, AppState>) -> Res
 }
 
 /// Required daily work seconds (schedule span minus scheduled auto-breaks),
-/// for admin views that compute per-day time loss client-side.
+/// for admin views that compute per-day time loss client-side. This is the
+/// company-wide schedule and does not depend on the logged-in admin's own
+/// external-staff status; callers apply the per-employee exemption.
 #[tauri::command]
 pub fn get_required_seconds(state: State<'_, AppState>) -> i64 {
     let cfg = state.config.lock();
@@ -559,7 +561,10 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             cfg.pb_url.clone(),
             cfg.pb_token.clone(),
             cfg.user_id.clone(),
-            cfg.required_work_seconds(&breaks),
+            // Self-exemption: an external-staff user has no required hours
+            // for their own dashboard, even though the company schedule
+            // itself is a shared, non-zero value used for everyone else.
+            if cfg.is_external_staff { 0 } else { cfg.required_work_seconds(&breaks) },
             elapsed,
             sess.total_break_seconds,
             sess.break_count,

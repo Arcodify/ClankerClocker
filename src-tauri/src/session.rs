@@ -248,12 +248,11 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Scheduled work seconds per day (clock_in_time → clock_out_time in NPT).
-    /// 0 when the schedule is unparsable or the user is external staff.
+    /// Scheduled work seconds per day (clock_in_time → clock_out_time in NPT),
+    /// independent of who is currently logged in. 0 when the schedule is
+    /// unparsable. Callers must apply any per-employee external-staff
+    /// exemption themselves (see `get_today_stats`/`get_time_summary`).
     pub fn required_seconds(&self) -> i64 {
-        if self.is_external_staff {
-            return 0;
-        }
         let parse = |v: &str| chrono::NaiveTime::parse_from_str(v, "%H:%M").ok();
         match (parse(&self.clock_in_time), parse(&self.clock_out_time)) {
             (Some(start), Some(end)) => (end - start).num_seconds().max(0),
