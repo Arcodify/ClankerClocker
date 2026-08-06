@@ -366,7 +366,8 @@ impl PocketBase {
                 "mouse_clicks": snap.mouse_clicks,
                 "active_app": snap.active_app,
                 "active_window": snap.active_window,
-                "idle_seconds": snap.idle_seconds
+                "idle_seconds": snap.idle_seconds,
+                "in_call": snap.in_call
             }),
         )
         .await?;
@@ -497,6 +498,7 @@ impl PocketBase {
                 break_seconds: s.break_seconds,
                 net_seconds: s.net_seconds,
                 net_loss_seconds: s.net_loss_seconds,
+                break_count: s.break_count,
             });
         }
 
@@ -606,7 +608,7 @@ impl PocketBase {
 
                 let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
                 let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
-                let (active_app, active_window_title) = active_app_res.unwrap_or_default();
+                let (active_app, active_window_title, in_call) = active_app_res.unwrap_or_default();
                 let (today_total_work_seconds, today_total_break_seconds) = today_res
                     .map(|s| (s.total_work_seconds, s.total_break_seconds))
                     .unwrap_or((0, 0));
@@ -627,6 +629,7 @@ impl PocketBase {
                         today_total_work_seconds,
                         today_total_break_seconds,
                         is_external_staff,
+                        in_call,
                     },
                 )
             });
@@ -692,6 +695,7 @@ impl PocketBase {
                     active_app: item["active_app"].as_str().unwrap_or("").to_string(),
                     active_window: item["active_window"].as_str().unwrap_or("").to_string(),
                     idle_seconds: item["idle_seconds"].as_u64().unwrap_or(0),
+                    in_call: item["in_call"].as_bool().unwrap_or(false),
                 })
             })
             .collect();
@@ -1044,6 +1048,7 @@ impl PocketBase {
         let mut total_clicks: u64 = 0;
         let mut total_snaps: u32 = 0;
         let mut idle_snaps: u32 = 0;
+        let mut call_snaps: u32 = 0;
         let mut app_seconds: HashMap<String, i64> = HashMap::new();
         let mut window_seconds: HashMap<String, i64> = HashMap::new();
 
@@ -1062,7 +1067,13 @@ impl PocketBase {
                     total_keystrokes += item["keystrokes"].as_u64().unwrap_or(0);
                     total_clicks += item["mouse_clicks"].as_u64().unwrap_or(0);
                     let idle = item["idle_seconds"].as_u64().unwrap_or(0);
-                    if idle >= 60 {
+                    let in_call = item["in_call"].as_bool().unwrap_or(false);
+                    if in_call {
+                        call_snaps += 1;
+                    }
+                    // A silent call still counts as working, not idle — the
+                    // mic being open overrides the raw idle-time reading.
+                    if idle >= 60 && !in_call {
                         idle_snaps += 1;
                     } else {
                         let app = item["active_app"].as_str().unwrap_or("").to_string();
@@ -1080,6 +1091,11 @@ impl PocketBase {
 
         let idle_pct = if total_snaps > 0 {
             idle_snaps as f32 / total_snaps as f32 * 100.0
+        } else {
+            0.0
+        };
+        let call_pct = if total_snaps > 0 {
+            call_snaps as f32 / total_snaps as f32 * 100.0
         } else {
             0.0
         };
@@ -1117,6 +1133,7 @@ impl PocketBase {
             total_keystrokes,
             total_clicks,
             idle_pct,
+            call_pct,
             top_apps,
             top_windows,
             session_count,
@@ -1125,7 +1142,7 @@ impl PocketBase {
     }
 
     /// Latest (active_app, active_window title) reported for a session.
-    async fn get_latest_active_app(&self, session_id: &str) -> Result<(String, String)> {
+    async fn get_latest_active_app(&self, session_id: &str) -> Result<(String, String, bool)> {
         let url = format!(
             "{}/api/collections/activity_snapshots/records?filter={}&sort=-timestamp&perPage=1",
             self.base_url,
@@ -1138,13 +1155,14 @@ impl PocketBase {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Ok((String::new(), String::new()));
+            return Ok((String::new(), String::new(), false));
         }
         let data: Value = resp.json().await?;
         let item = &data["items"][0];
         Ok((
             item["active_app"].as_str().unwrap_or("").to_string(),
             item["active_window"].as_str().unwrap_or("").to_string(),
+            item["in_call"].as_bool().unwrap_or(false),
         ))
     }
 }

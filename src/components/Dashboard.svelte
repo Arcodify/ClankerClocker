@@ -31,9 +31,12 @@
         ) - $session.total_break_seconds)
       : 0;
 
-  // Today's totals baseline (from the last refreshTodayStats() fetch, which
-  // only reflects sessions closed *before* the current one started) plus the
-  // live current-session delta, so these tick in real time without repolling.
+  // Today's totals baseline (from the last refreshTodayStats() fetch) plus
+  // the live current-session delta, so these tick in real time without
+  // repolling. The backend (commands::get_today_stats) excludes whichever
+  // session is still open from this baseline specifically so it's safe to
+  // add sessionWorkSeconds/currentBreakElapsed here without double-counting
+  // it — don't remove that exclusion without updating this math too.
   $: totalTimeTodaySeconds = ($todayStats?.total_work_seconds ?? 0) + sessionWorkSeconds;
 
   $: currentBreakElapsed = $session.status === "on_break" ? $elapsedSeconds : 0;
@@ -429,8 +432,12 @@
           </div>
           <div class="stat-divider"></div>
           <div class="stat">
-            <span class="sv">{liveCounters.idle_seconds}s</span>
-            <span class="sl">idle</span>
+            {#if liveCounters.in_call}
+              <span class="sv in-call">In Call</span>
+            {:else}
+              <span class="sv">{liveCounters.idle_seconds}s</span>
+            {/if}
+            <span class="sl">{liveCounters.in_call ? "status" : "idle"}</span>
           </div>
         </div>
         {#if liveCounters.active_app}
@@ -459,8 +466,12 @@
           </div>
           <div class="stat-divider"></div>
           <div class="stat">
-            <span class="sv">{$latestActivity.idle_seconds}s</span>
-            <span class="sl">idle</span>
+            {#if $latestActivity.in_call}
+              <span class="sv in-call">In Call</span>
+            {:else}
+              <span class="sv">{$latestActivity.idle_seconds}s</span>
+            {/if}
+            <span class="sl">{$latestActivity.in_call ? "status" : "idle"}</span>
           </div>
         </div>
         {#if $latestActivity.active_app}
@@ -741,6 +752,7 @@
   }
   .stat { flex: 1; display: flex; flex-direction: column; align-items: center; }
   .sv { font-size: 20px; font-weight: 600; color: #d8d8ec; font-variant-numeric: tabular-nums; }
+  .sv.in-call { font-size: 13px; color: #38bdf8; }
   .sl { font-size: 9px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; }
   .stat-divider { width: 1px; height: 28px; background: #1e1e2a; flex-shrink: 0; }
 

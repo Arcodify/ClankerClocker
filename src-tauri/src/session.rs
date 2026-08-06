@@ -77,6 +77,10 @@ pub struct ActivitySnapshot {
     pub active_app: String,
     pub active_window: String,
     pub idle_seconds: u64,
+    /// Whether the microphone was actively captured (see monitor::call) —
+    /// treated as "working" even though idle_seconds may be climbing.
+    #[serde(default)]
+    pub in_call: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +180,8 @@ pub struct TodaySessionBreakdown {
     pub break_seconds: i64,
     pub net_seconds: i64,
     pub net_loss_seconds: i64,
+    #[serde(default)]
+    pub break_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +213,9 @@ pub struct TeamMember {
     pub today_total_break_seconds: i64,
     #[serde(default)]
     pub is_external_staff: bool,
+    /// Whether this member's mic was active as of the most recent snapshot.
+    #[serde(default)]
+    pub in_call: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,6 +361,9 @@ pub struct ActivityReport {
     pub total_keystrokes: u64,
     pub total_clicks: u64,
     pub idle_pct: f32,
+    /// % of snapshots where the mic was active (excluded from idle_pct).
+    #[serde(default)]
+    pub call_pct: f32,
     pub top_apps: Vec<AppUsage>,
     /// Same shape as top_apps but keyed by window title.
     #[serde(default)]

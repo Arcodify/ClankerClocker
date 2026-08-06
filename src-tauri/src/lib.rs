@@ -305,6 +305,9 @@ impl Background {
             self.debug.apply_to_config(&mut config_snapshot);
 
             let (active_app, active_window) = self.read_active_window().await;
+            let in_call = tauri::async_runtime::spawn_blocking(monitor::call::mic_active)
+                .await
+                .unwrap_or(false);
 
             if self.status() == SessionStatus::Idle {
                 // Clear per-session state so the next session starts fresh.
@@ -314,17 +317,17 @@ impl Background {
                 self.pending_auto_breaks.lock().clear();
             }
 
-            self.tick_idle_clockout(&config_snapshot, &active_app, &active_window)
-                .await;
+            self.tick_idle_clockout(&config_snapshot, in_call).await;
             self.tick_clock_in_reminder(now_npt, &config_snapshot);
             self.tick_scheduled_clockout(now, now_npt, &config_snapshot)
                 .await;
             self.tick_auto_breaks().await;
-            self.emit_live_counters(&active_app, &active_window);
+            self.emit_live_counters(&active_app, &active_window, in_call);
 
             if self.snapshot_tick >= 30 {
                 self.snapshot_tick = 0;
-                self.push_activity_snapshot(active_app, active_window).await;
+                self.push_activity_snapshot(active_app, active_window, in_call)
+                    .await;
             }
             if self.network_tick >= 60 {
                 self.network_tick = 0;
@@ -399,7 +402,7 @@ impl Background {
         }
     }
 
-    async fn tick_idle_clockout(&self, cfg: &AppConfig, active_app: &str, active_window: &str) {
+    async fn tick_idle_clockout(&self, cfg: &AppConfig, in_call: bool) {
         let (status, session_id) = {
             let sess = self.session.lock();
             (sess.status.clone(), sess.session_id.clone())
@@ -418,9 +421,9 @@ impl Background {
         if status != SessionStatus::Active || !cfg.auto_clock_out_enabled {
             return;
         }
-        // Suppress idle warnings/clock-out while the user is in a
-        // video/audio conference — talking doesn't move the mouse.
-        if is_conference_active(active_app, active_window) {
+        // Suppress idle warnings/clock-out while the mic is actively
+        // capturing — talking on a call doesn't move the mouse.
+        if in_call {
             return;
         }
 
@@ -736,7 +739,7 @@ impl Background {
         }
     }
 
-    fn emit_live_counters(&self, active_app: &str, active_window: &str) {
+    fn emit_live_counters(&self, active_app: &str, active_window: &str, in_call: bool) {
         let c = self.counters.lock();
         let live = serde_json::json!({
             "keystrokes": c.keystrokes,
@@ -746,6 +749,7 @@ impl Background {
             "active_app": active_app,
             "active_window": active_window,
             "input_monitoring_active": self.input_monitoring.load(Ordering::Relaxed),
+            "in_call": in_call,
         });
         drop(c);
         self.app.emit("live-counters", live).ok();
@@ -753,7 +757,12 @@ impl Background {
 
     /// Every 30s: drain the counters into a snapshot, show it in the UI, and
     /// push it to PocketBase (queued locally when offline).
-    async fn push_activity_snapshot(&self, active_app: String, active_window: String) {
+    async fn push_activity_snapshot(
+        &self,
+        active_app: String,
+        active_window: String,
+        in_call: bool,
+    ) {
         let (ks, mc, md) = self.counters.lock().drain();
         let idle = self.counters.lock().idle_seconds();
 
@@ -765,6 +774,7 @@ impl Background {
             active_app,
             active_window,
             idle_seconds: idle,
+            in_call,
         };
         self.app.emit("activity-update", &snap).ok();
 
@@ -828,38 +838,6 @@ impl Background {
 
 /// Returns true when the user appears to be in an active audio/video conference.
 /// Keyboard and mouse are naturally idle during calls, so we must not auto-clock-out.
-fn is_conference_active(app: &str, window: &str) -> bool {
-    let app_lc = app.to_lowercase();
-    let win_lc = window.to_lowercase();
-
-    // App process name covers native clients (Discord, Zoom, Teams, Slack, etc.)
-    const CONF_APPS: &[&str] = &[
-        "discord", "zoom", "teams", "slack", "webex", "whereby", "skype",
-    ];
-    if CONF_APPS.iter().any(|a| app_lc.contains(a)) {
-        return true;
-    }
-
-    // Window title covers browser-embedded meetings (Google Meet, Jitsi, etc.)
-    const CONF_TITLES: &[&str] = &[
-        "google meet",
-        "meet –", // GNOME truncation of "Meet – Google Meet"
-        "meet -",
-        "zoom meeting",
-        "zoom call",
-        "teams meeting",
-        "slack huddle",
-        "webex meeting",
-        "jitsi meet",
-        "whereby.com",
-    ];
-    if CONF_TITLES.iter().any(|t| win_lc.contains(t)) {
-        return true;
-    }
-
-    false
-}
-
 fn auto_break_history_key(config_id: &str) -> String {
     let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset");
     let now_nepal = Utc::now().with_timezone(&nepal_offset);

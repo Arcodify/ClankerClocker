@@ -586,6 +586,9 @@
                 {#if m.is_external_staff}
                   <span class="badge-ext">External</span>
                 {/if}
+                {#if m.in_call}
+                  <span class="badge-call">In Call</span>
+                {/if}
                 <span class={m.status === "on_break" ? "badge-break" : "badge-active"}>
                   {m.status === "on_break" ? "On Break" : "Active"}
                 </span>
@@ -616,6 +619,9 @@
             <span class="dot" class:on-break={liveSelected.status === "on_break"}></span>
             <span class="mname">{liveSelected.user_name}</span>
           </div>
+          {#if liveSelected.in_call}
+            <span class="badge-call">In Call</span>
+          {/if}
           <span class={liveSelected.status === "on_break" ? "badge-break" : "badge-active"}>
             {liveSelected.status === "on_break" ? "On Break" : "Active"}
           </span>
@@ -931,6 +937,7 @@
           <div class="sum-card"><span class="sumv">{activityReport.total_keystrokes.toLocaleString()}</span><span class="suml">Keystrokes</span></div>
           <div class="sum-card"><span class="sumv">{activityReport.total_clicks.toLocaleString()}</span><span class="suml">Clicks</span></div>
           <div class="sum-card"><span class="sumv" class:idle-high={activityReport.idle_pct > 40}>{activityReport.idle_pct.toFixed(1)}%</span><span class="suml">Idle</span></div>
+          <div class="sum-card"><span class="sumv call-pct">{activityReport.call_pct.toFixed(1)}%</span><span class="suml">In Call</span></div>
           <div class="sum-card"><span class="sumv">{activityReport.total_snapshot_count}</span><span class="suml">Snapshots</span></div>
         </div>
         <!-- App usage -->
@@ -1184,6 +1191,7 @@
   .badge-break { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #f59e0b; background: #1c1a10; border: 1px solid #3a2e00; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
   .badge-done { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #6060a0; background: #111118; border: 1px solid #2a2a3a; padding: 2px 6px; border-radius: 3px; }
   .badge-ext { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #7c6af7; background: #14102a; border: 1px solid #2e2650; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+  .badge-call { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #38bdf8; background: #0a1a2a; border: 1px solid #123a52; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
   .ext-toggle { background: #111118; border: 1px solid #2e2650; color: #6a5ad0; font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
   .ext-toggle:hover:not(:disabled) { border-color: #7c6af7; color: #9a8aff; }
   .ext-toggle.on { background: #1a1438; color: #9a8aff; }
@@ -1204,6 +1212,7 @@
   .sumv { font-size: 15px; font-weight: 700; color: #d8d8ec; font-variant-numeric: tabular-nums; }
   .suml { font-size: 9px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; text-align: center; }
   .idle-high { color: #ef4444; }
+  .call-pct { color: #38bdf8; }
 
   /* ── Cards ── */
   .card { background: #111118; border: 1px solid #1a1a24; border-radius: 10px; padding: 12px 14px; }

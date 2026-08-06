@@ -18,6 +18,7 @@ export interface ActivitySnapshot {
   active_app: string;
   active_window: string;
   idle_seconds: number;
+  in_call: boolean;
 }
 
 export interface NetworkConnection {
@@ -53,6 +54,7 @@ export interface TodaySessionBreakdown {
   break_seconds: number;
   net_seconds: number;
   net_loss_seconds: number;
+  break_count: number;
 }
 
 export interface TodayBreakdown {
@@ -78,6 +80,7 @@ export interface TeamMember {
   today_total_work_seconds: number;
   today_total_break_seconds: number;
   is_external_staff: boolean;
+  in_call: boolean;
 }
 
 export interface AppSettings {
@@ -109,6 +112,7 @@ export interface LiveCounters {
   active_app: string;
   active_window: string;
   input_monitoring_active: boolean;
+  in_call: boolean;
 }
 
 export interface AppNotification {
@@ -189,6 +193,7 @@ export interface ActivityReport {
   total_keystrokes: number;
   total_clicks: number;
   idle_pct: number;
+  call_pct: number;
   top_apps: AppUsage[];
   /** Same shape as top_apps but keyed by window title. */
   top_windows: AppUsage[];

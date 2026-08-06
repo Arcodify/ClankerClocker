@@ -549,7 +549,16 @@ pub fn get_required_seconds(state: State<'_, AppState>) -> i64 {
 
 #[tauri::command]
 pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, String> {
-    let (pb_url, pb_token, user_id, required_seconds, sess_elapsed, sess_break_secs, sess_break_count) = {
+    let (
+        pb_url,
+        pb_token,
+        user_id,
+        required_seconds,
+        sess_elapsed,
+        sess_break_secs,
+        sess_break_count,
+        open_session_id,
+    ) = {
         let cfg = state.config.lock();
         let sess = state.session.lock();
         let breaks = state.break_configs.lock();
@@ -568,6 +577,13 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             elapsed,
             sess.total_break_seconds,
             sess.break_count,
+            // The dashboard adds its own live-ticking elapsed/break time for
+            // the session that's still open on top of whatever this returns,
+            // so that session's contribution must be excluded below —
+            // otherwise it gets counted twice (backend total + live delta).
+            (sess.status != SessionStatus::Idle)
+                .then(|| sess.session_id.clone())
+                .flatten(),
         )
     };
 
@@ -585,12 +601,35 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
     }
 
     let pb = PocketBase::new(pb_url, pb_token);
-    let mut stats = pb
-        .get_today_stats(&user_id)
+    let breakdown = pb
+        .get_today_breakdown(&user_id)
         .await
         .map_err(|e| e.to_string())?;
-    stats.required_seconds = required_seconds;
-    Ok(stats)
+
+    let mut total_work_seconds = breakdown.total_work_seconds;
+    let mut total_break_seconds = breakdown.total_break_seconds;
+    let mut total_net_loss_seconds = breakdown.total_net_loss_seconds;
+    let mut break_count = breakdown.break_count;
+    let mut session_count = breakdown.session_count;
+
+    if let Some(sid) = open_session_id {
+        if let Some(cur) = breakdown.sessions.iter().find(|s| s.session_id == sid) {
+            total_work_seconds -= cur.net_seconds;
+            total_break_seconds -= cur.break_seconds;
+            total_net_loss_seconds -= cur.net_loss_seconds;
+            break_count = break_count.saturating_sub(cur.break_count);
+            session_count = session_count.saturating_sub(1);
+        }
+    }
+
+    Ok(TodayStats {
+        session_count,
+        total_work_seconds: total_work_seconds.max(0),
+        break_count,
+        total_break_seconds: total_break_seconds.max(0),
+        total_net_loss_seconds: total_net_loss_seconds.max(0),
+        required_seconds,
+    })
 }
 
 #[tauri::command]
