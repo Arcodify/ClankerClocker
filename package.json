@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "bundle:appimage": "tauri build --bundles appimage",
     "version:set": "node scripts/set-version.mjs",
-    "install:macos:unsigned": "bash scripts/install-macos-unsigned.sh"
+    "install:macos:unsigned": "bash scripts/install-macos-unsigned.sh",
+    "fix:macos": "bash scripts/clanker-fix.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

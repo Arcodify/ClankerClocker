@@ -56,6 +56,11 @@
       "deb": {
         "desktopTemplate": "icons/ClankerClocker.desktop"
       }
+    },
+    "macOS": {
+      "files": {
+        "Resources/clanker-fix.sh": "../scripts/clanker-fix.sh"
+      }
     }
   }
 }

@@ -67,6 +67,11 @@ npm run install:macos:unsigned   # copies to ~/Applications, strips quarantine, 
 
 See `docs/macos-unsigned-release.md` for details.
 
+If a built/installed app won't launch, or Accessibility/Automation
+permissions don't stick between launches, run the `clanker-fix` command
+(auto-installed to `~/.local/bin` the first time the app launches — see
+`docs/macos-troubleshooting.md`) or `npm run fix:macos` from a checkout.
+
 ## Known Issues (Linux)
 
 ### Audio device locking on Kali Linux (and other minimal Debian-based installs)

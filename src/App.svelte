@@ -16,11 +16,28 @@
   import About from "./components/About.svelte";
   import AdminView from "./components/AdminView.svelte";
   import Dialog from "./components/Dialog.svelte";
+  import NotificationBanner from "./components/NotificationBanner.svelte";
   import { formatDuration } from "./lib/stores";
 
   let ticker: ReturnType<typeof setInterval>;
   let showTimeLossDialog = false;
   let timeLossDeficit = 0;
+
+  // Only the latest notification is ever shown — stacking them was the
+  // exact problem that got the old in-app cards removed. Auto-dismiss keeps
+  // it from ever going stale if nobody's at the keyboard.
+  let activeNotification: AppNotification | null = null;
+  let notificationTimeout: ReturnType<typeof setTimeout>;
+  function showNotificationBanner(n: AppNotification) {
+    clearTimeout(notificationTimeout);
+    activeNotification = null;
+    // Re-triggers the banner's mount animation even if a notification of
+    // the same kind is already showing.
+    requestAnimationFrame(() => {
+      activeNotification = n;
+      notificationTimeout = setTimeout(() => (activeNotification = null), 10_000);
+    });
+  }
 
   async function onTimeLossContinue() {
     showTimeLossDialog = false;
@@ -92,9 +109,12 @@
         showTimeLossDialog = true;
       }),
       listen<AppNotification>("app-notification", async (e) => {
-        // System notification only — no in-app cards, they covered the UI
-        // and stacked up stale while the window was hidden in the tray.
-        // Sound is played backend-side (src-tauri/src/audio.rs).
+        // Backend already shows+focuses the window and flashes the
+        // taskbar/dock icon (src-tauri/src/lib.rs Background::notify) before
+        // this fires, so the in-app banner below is what's actually seen.
+        // The OS notification is a fallback for the rare case focus can't be
+        // stolen. Sound is played backend-side (src-tauri/src/audio.rs).
+        showNotificationBanner(e.payload);
         try {
           let permission = await isPermissionGranted();
           if (!permission) {
@@ -110,6 +130,7 @@
 
     return () => {
       clearInterval(ticker);
+      clearTimeout(notificationTimeout);
       unlistens.forEach(p => p.catch(() => {}).then(u => u && u()));
     };
   });
@@ -198,6 +219,15 @@
 </script>
 
 <main>
+  {#if activeNotification}
+    {#key activeNotification}
+      <NotificationBanner
+        notification={activeNotification}
+        on:dismiss={() => (activeNotification = null)}
+      />
+    {/key}
+  {/if}
+
   {#if $view === "login"}
     <Login on:done={onLoginDone} on:skip={onSkip} />
   {:else if $view === "dashboard"}

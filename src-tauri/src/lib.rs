@@ -148,6 +148,9 @@ pub fn run() {
                 win.set_focus().ok();
             }
 
+            #[cfg(target_os = "macos")]
+            install_clanker_fix_cli(app.handle());
+
             app.manage(AppState {
                 session: session.clone(),
                 counters: counters.clone(),
@@ -351,6 +354,37 @@ impl Background {
     fn notify(&self, kind: &str, title: &str, body: &str) {
         if let Some(state) = self.app.try_state::<AppState>() {
             state.audio.play(kind);
+        }
+        // The tray window is hidden most of the time, so a background toast
+        // is easy to miss entirely. Bring the window forward so the in-app
+        // flashing banner (App.svelte) is actually seen. Plain show()/
+        // set_focus() is not enough on several Linux WMs/compositors, which
+        // refuse to raise a window for a background process ("focus
+        // stealing prevention") — toggling always-on-top forces a restack
+        // even when they ignore the focus request outright. Also flash the
+        // taskbar/dock icon as a fallback for the cases where none of this
+        // can get the window on top (e.g. a fullscreen app has focus).
+        if let Some(win) = self.app.get_webview_window("main") {
+            if let Err(e) = win.show() {
+                log::warn!("notify: show() failed: {e}");
+            }
+            if let Err(e) = win.unminimize() {
+                log::warn!("notify: unminimize() failed: {e}");
+            }
+            if let Err(e) = win.set_always_on_top(true) {
+                log::warn!("notify: set_always_on_top(true) failed: {e}");
+            }
+            if let Err(e) = win.set_focus() {
+                log::warn!("notify: set_focus() failed: {e}");
+            }
+            win.set_always_on_top(false).ok();
+            if let Err(e) =
+                win.request_user_attention(Some(tauri::UserAttentionType::Critical))
+            {
+                log::warn!("notify: request_user_attention() failed: {e}");
+            }
+        } else {
+            log::warn!("notify: no \"main\" window found to show");
         }
         self.app
             .emit(
@@ -836,8 +870,6 @@ impl Background {
     }
 }
 
-/// Returns true when the user appears to be in an active audio/video conference.
-/// Keyboard and mouse are naturally idle during calls, so we must not auto-clock-out.
 fn auto_break_history_key(config_id: &str) -> String {
     let nepal_offset = FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset");
     let now_nepal = Utc::now().with_timezone(&nepal_offset);
@@ -846,6 +878,78 @@ fn auto_break_history_key(config_id: &str) -> String {
 
 fn parse_hhmm(value: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(value, "%H:%M").ok()
+}
+
+/// Installs the `clanker-fix` troubleshooting command (bundled as
+/// Resources/clanker-fix.sh, see tauri.conf.json's macOS.files) to
+/// ~/.local/bin so it's runnable from any terminal. Runs on every launch —
+/// overwriting the target each time is cheap and means an app update also
+/// updates the installed command. See docs/macos-troubleshooting.md.
+#[cfg(target_os = "macos")]
+fn install_clanker_fix_cli(app: &tauri::AppHandle) {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(resource_dir) = app.path().resource_dir() else {
+        log::warn!("clanker-fix: could not resolve resource dir");
+        return;
+    };
+    let script_src = resource_dir.join("clanker-fix.sh");
+    let script_bytes = match fs::read(&script_src) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("clanker-fix: bundled script not found at {script_src:?}: {e}");
+            return;
+        }
+    };
+
+    let Ok(home) = app.path().home_dir() else {
+        log::warn!("clanker-fix: could not resolve home dir");
+        return;
+    };
+    let bin_dir = home.join(".local").join("bin");
+    if let Err(e) = fs::create_dir_all(&bin_dir) {
+        log::warn!("clanker-fix: could not create {bin_dir:?}: {e}");
+        return;
+    }
+
+    let dest = bin_dir.join("clanker-fix");
+    if let Err(e) = fs::write(&dest, &script_bytes) {
+        log::warn!("clanker-fix: could not write {dest:?}: {e}");
+        return;
+    }
+    if let Err(e) = fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)) {
+        log::warn!("clanker-fix: could not chmod {dest:?}: {e}");
+    }
+
+    ensure_local_bin_on_path(&home, &bin_dir);
+}
+
+/// Appends a PATH export to ~/.zprofile (once, marker-guarded) if
+/// ~/.local/bin isn't already on it. zsh is the default macOS shell since
+/// Catalina; .zprofile is sourced for login shells (new Terminal windows).
+#[cfg(target_os = "macos")]
+fn ensure_local_bin_on_path(home: &std::path::Path, bin_dir: &std::path::Path) {
+    use std::fs;
+    use std::io::Write;
+
+    const MARKER: &str = "# Added by ClankerClocker (clanker-fix)";
+    let profile = home.join(".zprofile");
+    let existing = fs::read_to_string(&profile).unwrap_or_default();
+    if existing.contains(MARKER) {
+        return;
+    }
+
+    let line = format!("\n{MARKER}\nexport PATH=\"{}:$PATH\"\n", bin_dir.display());
+    let opened = fs::OpenOptions::new().create(true).append(true).open(&profile);
+    match opened {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                log::warn!("clanker-fix: could not update {profile:?}: {e}");
+            }
+        }
+        Err(e) => log::warn!("clanker-fix: could not open {profile:?}: {e}"),
+    }
 }
 
 fn nepal_offset() -> FixedOffset {
