@@ -75,6 +75,14 @@
 
   $: monitoringWarning = $session.status !== "idle" && liveCounters !== null
     && !liveCounters.input_monitoring_active;
+
+  // A session started via clock_in's offline fallback (no auth token at the
+  // time — e.g. Skip on the login screen, or a stale token that just got
+  // cleared) only exists on this machine until the backend syncs it up on
+  // next login. Flag it so it isn't silently invisible to the admin.
+  $: isUnsyncedSession = $session.status !== "idle"
+    && !!$session.session_id
+    && $session.session_id.startsWith("local-");
   $: platformName = navigator.userAgent.includes("Windows")
     ? "windows"
     : navigator.userAgent.includes("Mac")
@@ -341,6 +349,15 @@
         <div class="timer-sub">Ready to clock in</div>
       {/if}
     </div>
+
+    <!-- Unsynced session warning -->
+    {#if isUnsyncedSession}
+      <div class="warn-banner">
+        ⚠ You're clocked in on this device only — your admin can't see it yet.
+        <button class="warn-link" on:click={() => dispatch("settings")}>Log in</button>
+        to sync it (your clocked-in time is kept, nothing is lost).
+      </div>
+    {/if}
 
     <!-- Monitoring warning -->
     {#if monitoringWarning}
@@ -637,6 +654,18 @@
     color: #c06a00;
     line-height: 1.5;
   }
+  .warn-link {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0 2px;
+    font: inherit;
+    font-weight: 700;
+    color: #f59e0b;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .warn-link:hover { color: #fbbf24; }
   .actions {
     display: flex;
     justify-content: center;
