@@ -43,7 +43,6 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                             let mut got = false;
 
                             for ev in events {
-                                got = true;
                                 match ev.kind() {
                                     // FIX: classify keys by their own key code only.
                                     // Some keyboards also report a RELATIVE axis, which
@@ -51,16 +50,32 @@ fn linux_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                     // miscounted as mouse clicks. Click detection itself
                                     // is unchanged.
                                     InputEventKind::Key(key) if ev.value() == 1 => {
+                                        got = true;
                                         if is_mouse_button_code(key.code()) {
                                             mc += 1;
                                         } else {
                                             ks += 1;
                                         }
                                     }
-                                    InputEventKind::RelAxis(RelativeAxisType::REL_X) => {
+                                    // FIX: only count non-zero motion, and only treat it
+                                    // (like the key match above) as real activity. The old
+                                    // code set `got = true` for *every* fetched event
+                                    // regardless of kind — including sync markers, key
+                                    // releases, and zero-delta axis reports some devices
+                                    // send as keep-alive/idle packets — so the idle timer
+                                    // could reset with nobody actually at the keyboard.
+                                    // That let the 4:30 idle warning re-fire indefinitely
+                                    // without ever reaching the 5:00 auto-clockout.
+                                    InputEventKind::RelAxis(RelativeAxisType::REL_X)
+                                        if ev.value() != 0 =>
+                                    {
+                                        got = true;
                                         dx += ev.value() as f64
                                     }
-                                    InputEventKind::RelAxis(RelativeAxisType::REL_Y) => {
+                                    InputEventKind::RelAxis(RelativeAxisType::REL_Y)
+                                        if ev.value() != 0 =>
+                                    {
+                                        got = true;
                                         dy += ev.value() as f64
                                     }
                                     _ => {}
@@ -128,18 +143,30 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                 if let Err(e) = listen(move |event: Event| {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut c = counters_ref.lock();
-                        c.last_activity = Some(std::time::Instant::now());
+                        // FIX: last_activity used to be stamped unconditionally for
+                        // *every* rdev event, including KeyRelease/ButtonRelease and
+                        // zero-distance MouseMove reports (some mice/touchpads and
+                        // remote-desktop/virtual-display drivers emit these as
+                        // periodic no-op packets). That let the idle timer reset
+                        // with nobody actually at the keyboard, which on a 30s gap
+                        // between the 4:30 idle warning and the 5:00 auto-clockout
+                        // was enough to re-trigger the warning indefinitely without
+                        // ever reaching the clockout threshold. Only stamp it on
+                        // genuine key/button presses or real (nonzero) mouse motion.
                         match event.event_type {
                             EventType::KeyPress(_) => {
+                                c.last_activity = Some(std::time::Instant::now());
                                 c.keystrokes += 1;
                                 active_flag_ref.store(true, Ordering::Relaxed);
                             }
                             EventType::ButtonPress(_) => {
+                                c.last_activity = Some(std::time::Instant::now());
                                 c.mouse_clicks += 1;
                                 active_flag_ref.store(true, Ordering::Relaxed);
                             }
                             EventType::MouseMove { x, y } => {
                                 if x.is_finite() && y.is_finite() {
+                                    let mut moved = false;
                                     if c.last_mouse_x != 0.0 || c.last_mouse_y != 0.0 {
                                         let dx = x - c.last_mouse_x;
                                         let dy = y - c.last_mouse_y;
@@ -147,10 +174,14 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                         if dist.is_finite() && dist < 5000.0 {
                                             c.mouse_distance_px += dist;
                                         }
+                                        moved = dist > 0.0;
                                     }
                                     c.last_mouse_x = x;
                                     c.last_mouse_y = y;
-                                    active_flag_ref.store(true, Ordering::Relaxed);
+                                    if moved {
+                                        c.last_activity = Some(std::time::Instant::now());
+                                        active_flag_ref.store(true, Ordering::Relaxed);
+                                    }
                                 }
                             }
                             _ => {}

@@ -270,6 +270,7 @@ pub async fn clock_out_internal(
 
 #[tauri::command]
 pub async fn authenticate_pb(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     pb_url: String,
     pb_email: String,
@@ -318,6 +319,22 @@ pub async fn authenticate_pb(
         .save_config(&cfg_save)
         .map_err(|e| e.to_string())?;
 
+    // A session that was clocked in before we had credentials (Skip button,
+    // or a stale saved token that just got cleared) only exists in memory —
+    // sync it up now that we actually have a token.
+    if let Some((old_id, new_id)) = sync_local_session_to_pb(
+        &app,
+        &state.session,
+        &pb,
+        &cfg_save.user_id,
+        &cfg_save.user_name,
+        &cfg_save.user_email,
+    )
+    .await
+    {
+        state.db.lock().reassign_session_id(&old_id, &new_id).ok();
+    }
+
     Ok(json!({
         "token": auth.token,
         "user_id": auth.record.id,
@@ -352,6 +369,78 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, Str
 #[tauri::command]
 pub async fn get_session_state(state: State<'_, AppState>) -> Result<SessionState, String> {
     Ok(state.session.lock().clone())
+}
+
+/// If the current session was started via `clock_in`'s offline fallback
+/// (no PB token/url at the time, e.g. the login screen's Skip button or a
+/// stale saved token), it only exists in memory — nothing was ever created
+/// on PocketBase, so it never shows up for admins and can never be closed
+/// out server-side. Called once real credentials are available (right after
+/// login, and periodically from the offline-sync retry loop) to create the
+/// session on PocketBase now and swap the in-memory session over to the
+/// real id. Returns the (old, new) id pair on success so callers can
+/// re-tag any snapshot/network rows already queued under the old id.
+pub async fn sync_local_session_to_pb(
+    app: &tauri::AppHandle,
+    session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
+    pb: &PocketBase,
+    user_id: &str,
+    user_name: &str,
+    user_email: &str,
+) -> Option<(String, String)> {
+    if user_id.is_empty() {
+        return None;
+    }
+    let (status, old_id, clock_in, break_count, total_break_seconds, extended) = {
+        let sess = session.lock();
+        (
+            sess.status.clone(),
+            sess.session_id.clone(),
+            sess.clock_in,
+            sess.break_count,
+            sess.total_break_seconds,
+            sess.extended_past_schedule,
+        )
+    };
+    if status == SessionStatus::Idle {
+        return None;
+    }
+    let old_id = old_id.filter(|id| id.starts_with("local-"))?;
+    let clock_in = clock_in?;
+
+    let now = Utc::now();
+    pb.close_stale_sessions(user_id, &now).await.ok();
+    let new_id = pb
+        .create_session(user_id, &clock_in, user_name, user_email)
+        .await
+        .ok()?;
+
+    if extended {
+        pb.set_session_extended(&new_id, true).await.ok();
+    }
+    if break_count > 0 || total_break_seconds > 0 {
+        pb.update_session_break_metrics(&new_id, break_count, total_break_seconds)
+            .await
+            .ok();
+    }
+    if status == SessionStatus::OnBreak {
+        pb.update_session_status(&new_id, &SessionStatus::OnBreak)
+            .await
+            .ok();
+    }
+
+    {
+        let mut sess = session.lock();
+        if sess.session_id.as_deref() == Some(old_id.as_str()) {
+            sess.session_id = Some(new_id.clone());
+        }
+        let s = sess.clone();
+        drop(sess);
+        app.emit("session-update", s).ok();
+    }
+
+    log::info!("synced offline session {old_id} to PocketBase as {new_id}");
+    Some((old_id, new_id))
 }
 
 #[tauri::command]

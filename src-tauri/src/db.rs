@@ -98,6 +98,21 @@ impl LocalDb {
         Ok(cfg)
     }
 
+    /// Re-tags queued rows from a local-only session id onto the real
+    /// PocketBase id once that session has been synced up (see
+    /// `commands::sync_local_session_to_pb`).
+    pub fn reassign_session_id(&self, old_id: &str, new_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_snapshots SET session_id = ?2 WHERE session_id = ?1",
+            params![old_id, new_id],
+        )?;
+        self.conn.execute(
+            "UPDATE pending_network SET session_id = ?2 WHERE session_id = ?1",
+            params![old_id, new_id],
+        )?;
+        Ok(())
+    }
+
     pub fn queue_snapshot(&self, session_id: &str, snap: &ActivitySnapshot) -> Result<()> {
         let data = serde_json::to_string(snap)?;
         self.conn.execute(

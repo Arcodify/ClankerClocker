@@ -202,17 +202,42 @@ pub fn run() {
             // Offline sync retry every 5 minutes
             let config_sync = config.clone();
             let db_sync = db.clone();
+            let session_sync = session.clone();
+            let app_sync = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(300)).await;
-                    let (pb_url, pb_token) = {
+                    let (pb_url, pb_token, user_id, user_name, user_email) = {
                         let cfg = config_sync.lock();
-                        (cfg.pb_url.clone(), cfg.pb_token.clone())
+                        (
+                            cfg.pb_url.clone(),
+                            cfg.pb_token.clone(),
+                            cfg.user_id.clone(),
+                            cfg.user_name.clone(),
+                            cfg.user_email.clone(),
+                        )
                     };
                     if pb_url.is_empty() || pb_token.is_empty() {
                         continue;
                     }
                     let pb = PocketBase::new(pb_url, pb_token);
+
+                    // Safety net: catches a session left un-synced because it
+                    // was clocked in before credentials existed (Skip button /
+                    // stale token). The common case is already handled right
+                    // at login (see authenticate_pb).
+                    if let Some((old_id, new_id)) = commands::sync_local_session_to_pb(
+                        &app_sync,
+                        &session_sync,
+                        &pb,
+                        &user_id,
+                        &user_name,
+                        &user_email,
+                    )
+                    .await
+                    {
+                        db_sync.lock().reassign_session_id(&old_id, &new_id).ok();
+                    }
 
                     let snaps = { db_sync.lock().get_unsynced_snapshots().unwrap_or_default() };
                     for (id, sid, snap) in snaps {

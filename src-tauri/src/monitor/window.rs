@@ -37,28 +37,25 @@ pub fn start_hyprland_active_window_cache(
 
     std::thread::Builder::new()
         .name("hypr-activewindow".into())
-        .spawn(move || {
-            loop {
-                match UnixStream::connect(&socket_path) {
-                    Ok(stream) => {
-                        let reader = BufReader::new(stream);
-                        for line in reader.lines().flatten() {
-                            if let Some(data) = line.strip_prefix("activewindow>>") {
-                                if let Some((app, title)) = data.split_once(',') {
-                                    *cache.lock() =
-                                        (app.trim().to_string(), title.trim().to_string());
-                                }
-                            } else if line.starts_with("activewindowv2>>") {
-                                if let Ok((app, title)) = fetch_hyprland_active_window() {
-                                    *cache.lock() = (app, title);
-                                }
+        .spawn(move || loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => {
+                    let reader = BufReader::new(stream);
+                    for line in reader.lines().flatten() {
+                        if let Some(data) = line.strip_prefix("activewindow>>") {
+                            if let Some((app, title)) = data.split_once(',') {
+                                *cache.lock() = (app.trim().to_string(), title.trim().to_string());
+                            }
+                        } else if line.starts_with("activewindowv2>>") {
+                            if let Ok((app, title)) = fetch_hyprland_active_window() {
+                                *cache.lock() = (app, title);
                             }
                         }
                     }
-                    Err(e) => {
-                        log::warn!("Hyprland activewindow socket failed: {:?}", e);
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                    }
+                }
+                Err(e) => {
+                    log::warn!("Hyprland activewindow socket failed: {:?}", e);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             }
         })
@@ -295,7 +292,10 @@ fn process_name_from_pid(pid: u64) -> Option<String> {
 fn find_hyprland_focused_client(node: &serde_json::Value) -> Option<&serde_json::Value> {
     if let Some(items) = node.as_array() {
         for item in items {
-            let is_focused = item.get("focused").and_then(|v| v.as_bool()).unwrap_or(false)
+            let is_focused = item
+                .get("focused")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
                 || item.get("focusHistoryID").and_then(|v| v.as_i64()) == Some(0);
             if is_focused {
                 return Some(item);
@@ -307,7 +307,10 @@ fn find_hyprland_focused_client(node: &serde_json::Value) -> Option<&serde_json:
         return None;
     }
 
-    if node.get("focused").and_then(|v| v.as_bool()).unwrap_or(false)
+    if node
+        .get("focused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
         || node.get("focusHistoryID").and_then(|v| v.as_i64()) == Some(0)
     {
         return Some(node);
@@ -339,7 +342,11 @@ fn sway_active_window() -> Option<(String, String)> {
     let json: serde_json::Value = serde_json::from_str(&out).ok()?;
 
     fn find_focused(node: &serde_json::Value) -> Option<&serde_json::Value> {
-        if node.get("focused").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if node
+            .get("focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             return Some(node);
         }
         for key in ["nodes", "floating_nodes"] {
@@ -419,7 +426,10 @@ fn gnome_active_window_eval() -> Option<(String, String)> {
     let trimmed = out.trim().trim_start_matches('(').trim_end_matches(')');
     let last_comma = trimmed.rfind(',')?;
     let success_str = trimmed[last_comma + 1..].trim();
-    let result_str = trimmed[..last_comma].trim().trim_matches('\'').trim_matches('"');
+    let result_str = trimmed[..last_comma]
+        .trim()
+        .trim_matches('\'')
+        .trim_matches('"');
 
     // Eval was blocked — don't use this result.
     if success_str != "true" {
@@ -435,7 +445,11 @@ fn gnome_active_window_eval() -> Option<(String, String)> {
         .map(|(a, t)| (a.trim().to_string(), t.trim().to_string()))
         .unwrap_or_else(|| (result_str.trim().to_string(), String::new()));
 
-    if app.is_empty() && title.is_empty() { None } else { Some((app, title)) }
+    if app.is_empty() && title.is_empty() {
+        None
+    } else {
+        Some((app, title))
+    }
 }
 
 // --- FIX 2: gnome_active_window_xprop ---
@@ -474,10 +488,16 @@ fn gnome_active_window_xprop() -> Option<(String, String)> {
         .unwrap_or_default();
 
     let app = wm_class
-        .split('=').nth(1).unwrap_or("")
-        .split(',').nth(1)
+        .split('=')
+        .nth(1)
+        .unwrap_or("")
+        .split(',')
+        .nth(1)
         .unwrap_or_else(|| wm_class.split('=').nth(1).unwrap_or(""))
-        .trim().trim_matches('"').trim().to_string();
+        .trim()
+        .trim_matches('"')
+        .trim()
+        .to_string();
 
     // _NET_WM_NAME gives us the window title.
     let wm_name = Command::new("xprop")
@@ -489,8 +509,13 @@ fn gnome_active_window_xprop() -> Option<(String, String)> {
         .unwrap_or_default();
 
     let title = wm_name
-        .split('=').nth(1).unwrap_or("")
-        .trim().trim_matches('"').trim().to_string();
+        .split('=')
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .trim()
+        .to_string();
 
     if app.is_empty() && title.is_empty() {
         return None;
@@ -506,14 +531,19 @@ fn gnome_active_window_xprop() -> Option<(String, String)> {
         .unwrap_or_default();
 
     let proc_name = pid_out
-        .split('=').nth(1)
+        .split('=')
+        .nth(1)
         .and_then(|s| s.trim().parse::<u64>().ok())
         .and_then(process_name_from_pid)
         .unwrap_or_default();
 
-    let resolved_app = if !proc_name.is_empty() { proc_name }
-                       else if !app.is_empty()   { app }
-                       else                       { title.clone() };
+    let resolved_app = if !proc_name.is_empty() {
+        proc_name
+    } else if !app.is_empty() {
+        app
+    } else {
+        title.clone()
+    };
 
     Some((resolved_app, title))
 }
@@ -541,32 +571,81 @@ fn macos_active_window() -> (String, String) {
         .unwrap_or_default();
 
     let out = out.trim();
-    if let Some((app, win)) = out.split_once('|') {
-        return (app.trim().to_string(), win.trim().to_string());
-    }
-    if !out.is_empty() {
-        return (out.to_string(), String::new());
+    let (app, title) = if let Some((app, win)) = out.split_once('|') {
+        (app.trim().to_string(), win.trim().to_string())
+    } else if !out.is_empty() {
+        (out.to_string(), String::new())
+    } else {
+        // System Events needs the Automation permission; when it's denied the
+        // script errors and stdout is empty. lsappinfo needs no permission and
+        // still identifies the frontmost app (no window title), which keeps
+        // activity data and native-client conference detection working.
+        let out = Command::new("sh")
+            .args(["-c", "lsappinfo info -only name $(lsappinfo front)"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        // Output looks like: "LSDisplayName"="Safari"
+        let app = out
+            .split('=')
+            .next_back()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        (app, String::new())
+    };
+
+    // Chromium-based browsers draw their own tab strip instead of a native
+    // title bar, so the window's AXTitle (what System Events reads above)
+    // usually comes back empty. Ask the browser's own AppleScript dictionary
+    // for the active tab's title instead.
+    if title.is_empty() && is_chromium_browser(&app) {
+        if let Some(tab_title) = chromium_active_tab_title(&app) {
+            return (app, tab_title);
+        }
     }
 
-    // System Events needs the Automation permission; when it's denied the
-    // script errors and stdout is empty. lsappinfo needs no permission and
-    // still identifies the frontmost app (no window title), which keeps
-    // activity data and native-client conference detection working.
-    let out = Command::new("sh")
-        .args(["-c", "lsappinfo info -only name $(lsappinfo front)"])
+    (app, title)
+}
+
+#[cfg(target_os = "macos")]
+fn is_chromium_browser(app: &str) -> bool {
+    matches!(
+        app,
+        "Google Chrome"
+            | "Google Chrome Beta"
+            | "Google Chrome Dev"
+            | "Google Chrome Canary"
+            | "Brave Browser"
+            | "Microsoft Edge"
+            | "Vivaldi"
+            | "Arc"
+            | "Chromium"
+            | "Opera"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn chromium_active_tab_title(app: &str) -> Option<String> {
+    use std::process::Command;
+
+    let script = format!(r#"tell application "{app}" to get title of active tab of front window"#);
+
+    let out = Command::new("osascript")
+        .args(["-e", &script])
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    // Output looks like: "LSDisplayName"="Safari"
-    let app = out
-        .split('=')
-        .next_back()
-        .unwrap_or("")
-        .trim()
-        .trim_matches('"')
-        .to_string();
-    (app, String::new())
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    let title = out.trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -626,3 +705,4 @@ fn windows_active_window() -> (String, String) {
         (app, title)
     }
 }
+
