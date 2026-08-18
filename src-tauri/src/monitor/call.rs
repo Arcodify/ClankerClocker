@@ -113,9 +113,12 @@ fn macos_mic_active() -> bool {
         return false;
     }
 
-    get_u32_property(device_id, K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE)
-        .map(|v| v != 0)
-        .unwrap_or(false)
+    get_u32_property(
+        device_id,
+        K_AUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE,
+    )
+    .map(|v| v != 0)
+    .unwrap_or(false)
 }
 
 // ── Windows: CapabilityAccessManager consent store ───────────────────────────

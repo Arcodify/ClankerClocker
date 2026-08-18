@@ -2,14 +2,33 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
   import {
-    session, latestActivity, networkFeed, settings,
-    authToken, userId, isAdmin, userName,
-    errorMessage, view, elapsedSeconds,
+    isPermissionGranted,
+    requestPermission,
+    sendNotification,
+  } from "@tauri-apps/plugin-notification";
+  import {
+    session,
+    latestActivity,
+    networkFeed,
+    settings,
+    authToken,
+    userId,
+    isAdmin,
+    userName,
+    errorMessage,
+    view,
+    elapsedSeconds,
     todayStats,
   } from "./lib/stores";
-  import type { SessionState, ActivitySnapshot, NetworkConnection, AppNotification, TimeLossPrompt } from "./lib/types";
+  import type {
+    SessionState,
+    ActivitySnapshot,
+    NetworkConnection,
+    AppNotification,
+    TimeLossPrompt,
+    LiveCounters,
+  } from "./lib/types";
   import Login from "./components/Login.svelte";
   import Dashboard from "./components/Dashboard.svelte";
   import Settings from "./components/Settings.svelte";
@@ -35,46 +54,208 @@
     // the same kind is already showing.
     requestAnimationFrame(() => {
       activeNotification = n;
-      notificationTimeout = setTimeout(() => (activeNotification = null), 10_000);
+      notificationTimeout = setTimeout(
+        () => (activeNotification = null),
+        10_000,
+      );
     });
+  }
+
+  // In-app test shortcuts: typing any sequence anywhere while the window has
+  // focus fires an action — no OS-level grab needed, so this works fine
+  // under Wayland compositors like Hyprland where tauri-plugin-global-shortcut
+  // doesn't (see src-tauri git history).
+  //   lestercity1 — one-off: records keystrokes/mouse clicks for 1 minute,
+  //                 no push.
+  //   lestercity2 — repeating: records continuously and pushes a snapshot to
+  //                 PocketBase every 1 minute, until lestercity3 is typed or
+  //                 the session clocks out.
+  //   lestercity3 — stops the lestercity2 repeating push.
+  const RECORD_SHORTCUT = "lestercity1";
+  const PUSH_SHORTCUT = "lestercity2";
+  const STOP_SHORTCUT = "lestercity3";
+  const RECORDING_DURATION_MS = 60_000;
+  let shortcutBuffer = "";
+
+  async function notifySystem(title: string, body: string) {
+    try {
+      let permission = await isPermissionGranted();
+      if (!permission) {
+        const res = await requestPermission();
+        permission = res === "granted";
+      }
+      if (permission) sendNotification({ title, body });
+    } catch (_) {}
+  }
+
+  // Counters reset every ~30s server-side (Background::push_activity_snapshot
+  // drains them for syncing), so `live-counters` values follow a sawtooth,
+  // not a straight climb. Track deltas sample-to-sample instead of a single
+  // start/end diff, and treat any decrease as "counter was drained" — the
+  // new (lower) value is activity that happened entirely since the drain.
+  let recording = false;
+  let recordingHasBaseline = false;
+  let recordingLastKeystrokes = 0;
+  let recordingLastMouseClicks = 0;
+  let recordedKeystrokes = 0;
+  let recordedMouseClicks = 0;
+
+  function onLiveCountersForRecording(payload: LiveCounters) {
+    if (!recording) return;
+    if (!recordingHasBaseline) {
+      recordingHasBaseline = true;
+      recordingLastKeystrokes = payload.keystrokes;
+      recordingLastMouseClicks = payload.mouse_clicks;
+      return;
+    }
+    recordedKeystrokes +=
+      payload.keystrokes >= recordingLastKeystrokes
+        ? payload.keystrokes - recordingLastKeystrokes
+        : payload.keystrokes;
+    recordedMouseClicks +=
+      payload.mouse_clicks >= recordingLastMouseClicks
+        ? payload.mouse_clicks - recordingLastMouseClicks
+        : payload.mouse_clicks;
+    recordingLastKeystrokes = payload.keystrokes;
+    recordingLastMouseClicks = payload.mouse_clicks;
+  }
+
+  let repeatingPush = false;
+  let repeatIntervalId: ReturnType<typeof setInterval> | null = null;
+
+  function startRecording() {
+    if (repeatingPush) {
+      notifySystem("recording unavailable", "a repeating push is active — press lestercity3 first");
+      return;
+    }
+    recording = true;
+    recordingHasBaseline = false;
+    recordedKeystrokes = 0;
+    recordedMouseClicks = 0;
+    notifySystem("recording started", "capturing keystrokes and mouse clicks for 1 minute…");
+    setTimeout(() => {
+      recording = false;
+      notifySystem(
+        "recording finished",
+        `${recordedKeystrokes} keystrokes, ${recordedMouseClicks} mouse clicks in the last 1 min`,
+      );
+    }, RECORDING_DURATION_MS);
+  }
+
+  async function pushSnapshot(keystrokes: number, mouseClicks: number) {
+    try {
+      await invoke("push_test_activity_snapshot", { keystrokes, mouseClicks });
+      notifySystem(
+        "snapshot pushed",
+        `sent ${keystrokes} keystrokes, ${mouseClicks} mouse clicks to PocketBase`,
+      );
+    } catch (err) {
+      notifySystem("push failed", String(err));
+    }
+  }
+
+  function startRepeatingPush() {
+    if (repeatingPush) return;
+    if (recording) {
+      notifySystem("push unavailable", "a one-off recording is in progress — wait for it to finish");
+      return;
+    }
+    repeatingPush = true;
+    recording = true;
+    recordingHasBaseline = false;
+    recordedKeystrokes = 0;
+    recordedMouseClicks = 0;
+    notifySystem(
+      "repeating push started",
+      "sending keystrokes/mouse clicks to PocketBase every 1 min until lestercity3 or clock-out",
+    );
+    repeatIntervalId = setInterval(() => {
+      const ks = recordedKeystrokes;
+      const mc = recordedMouseClicks;
+      // Reset the accumulation window for the next interval immediately —
+      // onLiveCountersForRecording keeps accumulating into it while this push
+      // is in flight, so no activity is dropped between intervals.
+      recordedKeystrokes = 0;
+      recordedMouseClicks = 0;
+      pushSnapshot(ks, mc);
+    }, RECORDING_DURATION_MS);
+  }
+
+  function stopRepeatingPush(reason: string) {
+    if (!repeatingPush) return;
+    repeatingPush = false;
+    recording = false;
+    if (repeatIntervalId !== null) {
+      clearInterval(repeatIntervalId);
+      repeatIntervalId = null;
+    }
+    notifySystem("repeating push stopped", reason);
+  }
+
+  function handleShortcutKeydown(e: KeyboardEvent) {
+    if (e.key.length !== 1) return;
+    const maxLen = Math.max(
+      RECORD_SHORTCUT.length,
+      PUSH_SHORTCUT.length,
+      STOP_SHORTCUT.length,
+    );
+    shortcutBuffer = (shortcutBuffer + e.key).slice(-maxLen);
+    if (shortcutBuffer.endsWith(RECORD_SHORTCUT)) {
+      shortcutBuffer = "";
+      startRecording();
+    } else if (shortcutBuffer.endsWith(PUSH_SHORTCUT)) {
+      shortcutBuffer = "";
+      startRepeatingPush();
+    } else if (shortcutBuffer.endsWith(STOP_SHORTCUT)) {
+      shortcutBuffer = "";
+      stopRepeatingPush("stopped via lestercity3");
+    }
   }
 
   async function onTimeLossContinue() {
     showTimeLossDialog = false;
     // Session is already marked extended by the backend; this confirms it
     // (and re-applies it in case the earlier PocketBase PATCH failed).
-    try { await invoke("extend_session"); } catch (_) {}
+    try {
+      await invoke("extend_session");
+    } catch (_) {}
   }
 
   async function onTimeLossClockOut() {
     showTimeLossDialog = false;
-    try { await invoke("clock_out", { reason: null }); } catch (_) {}
+    try {
+      await invoke("clock_out", { reason: null });
+    } catch (_) {}
   }
 
   onMount(() => {
     console.log("App mounted");
-    initialize().catch(err => console.error("Initialize failed:", err));
+    initialize().catch((err) => console.error("Initialize failed:", err));
 
     // Restore running session from the Rust side (survives UI restarts)
-    invoke<SessionState>("get_session_state").then(state => {
-      console.log("Restored session:", state.status);
-      session.set(state);
-      if (state.status !== "idle" && state.clock_in) {
-        if (state.status === "on_break" && state.break_start) {
-          const breakStart = new Date(state.break_start).getTime();
-          elapsedSeconds.set(
-            Math.max(0, Math.floor((Date.now() - breakStart) / 1000))
-          );
-        } else {
-          const start = new Date(state.clock_in).getTime();
-          const elapsed =
-            Math.floor((Date.now() - start) / 1000) - state.total_break_seconds;
-          elapsedSeconds.set(Math.max(0, elapsed));
+    invoke<SessionState>("get_session_state")
+      .then((state) => {
+        console.log("Restored session:", state.status);
+        session.set(state);
+        if (state.status !== "idle" && state.clock_in) {
+          if (state.status === "on_break" && state.break_start) {
+            const breakStart = new Date(state.break_start).getTime();
+            elapsedSeconds.set(
+              Math.max(0, Math.floor((Date.now() - breakStart) / 1000)),
+            );
+          } else {
+            const start = new Date(state.clock_in).getTime();
+            const elapsed =
+              Math.floor((Date.now() - start) / 1000) -
+              state.total_break_seconds;
+            elapsedSeconds.set(Math.max(0, elapsed));
+          }
+          if (state.status === "active" || state.status === "on_break")
+            startTicker();
+          view.set("dashboard");
         }
-        if (state.status === "active" || state.status === "on_break") startTicker();
-        view.set("dashboard");
-      }
-    }).catch(err => console.warn("Failed to get session state:", err));
+      })
+      .catch((err) => console.warn("Failed to get session state:", err));
 
     // Real-time events from Rust daemon
     const unlistens: Array<Promise<any>> = [
@@ -83,17 +264,21 @@
         if (e.payload.status === "idle") {
           clearInterval(ticker);
           elapsedSeconds.set(0);
+          stopRepeatingPush("clocked out");
         } else if (e.payload.status === "on_break" && e.payload.break_start) {
           // The timer shows the current break's running duration (not counted
           // toward work time); the "active" branch below re-syncs from
           // clock_in once the break ends.
           const start = new Date(e.payload.break_start).getTime();
-          elapsedSeconds.set(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+          elapsedSeconds.set(
+            Math.max(0, Math.floor((Date.now() - start) / 1000)),
+          );
           startTicker();
         } else if (e.payload.status === "active" && e.payload.clock_in) {
           const start = new Date(e.payload.clock_in).getTime();
           elapsedSeconds.set(
-            Math.floor((Date.now() - start) / 1000) - e.payload.total_break_seconds
+            Math.floor((Date.now() - start) / 1000) -
+              e.payload.total_break_seconds,
           );
           startTicker();
         }
@@ -103,6 +288,9 @@
       }),
       listen<NetworkConnection[]>("network-update", (e) => {
         networkFeed.update((feed) => [...e.payload, ...feed].slice(0, 50));
+      }),
+      listen<LiveCounters>("live-counters", (e) => {
+        onLiveCountersForRecording(e.payload);
       }),
       listen<TimeLossPrompt>("time-loss-prompt", (e) => {
         timeLossDeficit = e.payload.deficit_seconds;
@@ -125,13 +313,17 @@
             sendNotification({ title: e.payload.title, body: e.payload.body });
           }
         } catch (_) {}
-      })
+      }),
     ];
+
+    window.addEventListener("keydown", handleShortcutKeydown);
 
     return () => {
       clearInterval(ticker);
       clearTimeout(notificationTimeout);
-      unlistens.forEach(p => p.catch(() => {}).then(u => u && u()));
+      unlistens.forEach((p) => p.catch(() => {}).then((u) => u && u()));
+      window.removeEventListener("keydown", handleShortcutKeydown);
+      if (repeatIntervalId !== null) clearInterval(repeatIntervalId);
     };
   });
 
@@ -162,7 +354,7 @@
           userId.set(saved.user_id);
           userName.set(saved.user_name || saved.user_email);
           isAdmin.set(!!saved.is_admin);
-          
+
           view.set("dashboard");
           refreshAuth().catch(() => {});
         }
@@ -260,7 +452,11 @@
 </main>
 
 <style>
-  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
+  :global(*, *::before, *::after) {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
   :global(body) {
     font-family: "Inter", system-ui, sans-serif;
     background: #0d0d0f;
@@ -270,7 +466,11 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  main { height: 100vh; display: flex; flex-direction: column; }
+  main {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
 
   .error-toast {
     position: fixed;
@@ -289,5 +489,4 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-
 </style>

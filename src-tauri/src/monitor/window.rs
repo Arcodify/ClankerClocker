@@ -705,4 +705,3 @@ fn windows_active_window() -> (String, String) {
         (app, title)
     }
 }
-

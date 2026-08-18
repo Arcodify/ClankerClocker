@@ -61,6 +61,12 @@
   let teamMembers: TeamMember[] = [];
   let liveLoading = true;
   let liveInterval: ReturnType<typeof setInterval>;
+  // team_status only refreshes every 30s, so "Since In" would otherwise sit
+  // frozen between polls while the employee's own dashboard ticks every
+  // second — visibly "out of sync" even though both sides agree on clock_in.
+  // Referencing this in the template forces elapsed() to re-run every second.
+  let tickerNow = Date.now();
+  let tickerInterval: ReturnType<typeof setInterval>;
   // per-member detail (live tab)
   let liveSelected: TeamMember | null = null;
   let liveSnapshots: ActivitySnapshot[] = [];
@@ -147,10 +153,12 @@
     }
     await refreshLive();
     liveInterval = setInterval(refreshLive, 30_000);
+    tickerInterval = setInterval(() => (tickerNow = Date.now()), 1000);
   });
 
   onDestroy(async () => {
     clearInterval(liveInterval);
+    clearInterval(tickerInterval);
     try {
       const win = getCurrentWindow();
       await win.setSize(new LogicalSize(MAIN_W, MAIN_H));
@@ -501,8 +509,8 @@
   }
 
   // ── Misc ──────────────────────────────────────────────────────────────────
-  function elapsed(iso: string): string {
-    const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  function elapsed(iso: string, now: number): string {
+    const secs = Math.floor((now - new Date(iso).getTime()) / 1000);
     if (secs < 60) return `${secs}s`;
     if (secs < 3600) return `${Math.floor(secs / 60)}m`;
     return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
@@ -596,7 +604,7 @@
               </div>
             </div>
             <div class="mstats">
-              <div class="ms"><span class="msv">{elapsed(m.clock_in)}</span><span class="msl">Since In</span></div>
+              <div class="ms"><span class="msv">{elapsed(m.clock_in, tickerNow)}</span><span class="msl">Since In</span></div>
               <div class="ms"><span class="msv">{hhmm(m.today_total_work_seconds)}</span><span class="msl">Work</span></div>
               <div class="ms"><span class="msv">{hhmm(m.today_total_break_seconds)}</span><span class="msl">Break</span></div>
               <div class="ms"><span class="msv">{m.break_count}</span><span class="msl">Breaks</span></div>
@@ -636,7 +644,7 @@
           </button>
         </div>
         <div class="sum-row">
-          <div class="sum-card"><span class="sumv">{elapsed(liveSelected.clock_in)}</span><span class="suml">Since In</span></div>
+          <div class="sum-card"><span class="sumv">{elapsed(liveSelected.clock_in, tickerNow)}</span><span class="suml">Since In</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_work_seconds)}</span><span class="suml">Today Work</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_break_seconds)}</span><span class="suml">Today Break</span></div>
           <div class="sum-card"><span class="sumv">{liveSelected.is_external_staff ? "—" : hhmm(Math.max(0, requiredSeconds - liveSelected.today_total_work_seconds))}</span><span class="suml">Today Time Loss</span></div>

@@ -43,6 +43,23 @@
   $: totalBreakTodaySeconds = ($todayStats?.total_break_seconds ?? 0)
     + $session.total_break_seconds + currentBreakElapsed;
 
+  // The instant clock_out flips $session.status to "idle", sessionWorkSeconds
+  // collapses to 0 while $todayStats still holds its pre-clockout baseline
+  // (which excludes the just-closed session's time by design — see the note
+  // above totalTimeTodaySeconds) — so the "Today" card would flash down to a
+  // too-low number for the moment between that status flip and the
+  // post-clockout refreshTodayStats() landing. Freeze the displayed totals at
+  // their last live value through that window instead of showing the dip.
+  let clockingOut = false;
+  let frozenTotalTimeTodaySeconds = 0;
+  let frozenTotalBreakTodaySeconds = 0;
+  $: displayedTotalTimeTodaySeconds = clockingOut
+    ? frozenTotalTimeTodaySeconds
+    : totalTimeTodaySeconds;
+  $: displayedTotalBreakTodaySeconds = clockingOut
+    ? frozenTotalBreakTodaySeconds
+    : totalBreakTodaySeconds;
+
   // Current break countdown: counts down from the break type's configured
   // duration; breaks with no configured duration (e.g. "Other") have no
   // target, so the timer falls back to counting up instead.
@@ -185,13 +202,17 @@
 
   async function doClockOut(reason: string | null) {
     loading = true;
+    frozenTotalTimeTodaySeconds = totalTimeTodaySeconds;
+    frozenTotalBreakTodaySeconds = totalBreakTodaySeconds;
+    clockingOut = true;
     try {
       await invoke("clock_out", { reason });
-      setTimeout(refreshTodayStats, 500);
+      await refreshTodayStats();
     } catch (e) {
       errorMessage.set(String(e));
     } finally {
       loading = false;
+      clockingOut = false;
     }
   }
 
@@ -407,7 +428,7 @@
             <span class="ts-lbl">session{$todayStats.session_count !== 1 ? "s" : ""}</span>
           </div>
           <div class="today-stat">
-            <span class="ts-val">{formatDuration(totalTimeTodaySeconds)}</span>
+            <span class="ts-val">{formatDuration(displayedTotalTimeTodaySeconds)}</span>
             <span class="ts-lbl">worked</span>
           </div>
           <div class="today-stat">
@@ -415,7 +436,7 @@
             <span class="ts-lbl">break{$todayStats.break_count !== 1 ? "s" : ""}</span>
           </div>
           <div class="today-stat">
-            <span class="ts-val">{formatDuration(totalBreakTodaySeconds)}</span>
+            <span class="ts-val">{formatDuration(displayedTotalBreakTodaySeconds)}</span>
             <span class="ts-lbl">break time</span>
           </div>
         </div>

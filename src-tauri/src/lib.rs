@@ -281,6 +281,7 @@ pub fn run() {
             commands::save_work_schedule,
             commands::refresh_auth_state,
             commands::clear_auth,
+            commands::push_test_activity_snapshot,
             commands::get_all_users,
             commands::get_sessions_report,
             commands::get_time_summary,
@@ -403,9 +404,7 @@ impl Background {
                 log::warn!("notify: set_focus() failed: {e}");
             }
             win.set_always_on_top(false).ok();
-            if let Err(e) =
-                win.request_user_attention(Some(tauri::UserAttentionType::Critical))
-            {
+            if let Err(e) = win.request_user_attention(Some(tauri::UserAttentionType::Critical)) {
                 log::warn!("notify: request_user_attention() failed: {e}");
             }
         } else {
@@ -570,7 +569,9 @@ impl Background {
         // and waiting here used to lose the race against the server cron.
         // Skipped once already extended: they've already answered this
         // today, and re-prompting would just re-show the same dialog.
-        if !extended && cfg.auto_clock_out_enabled && self.maybe_prompt_time_loss(now_npt, cfg).await
+        if !extended
+            && cfg.auto_clock_out_enabled
+            && self.maybe_prompt_time_loss(now_npt, cfg).await
         {
             self.scheduled_clockout_warned_at = None;
             return;
@@ -658,7 +659,11 @@ impl Background {
     /// "you're hours behind" prompt. This retries once on a hard failure and,
     /// on success, clamps the server's number up to `local_worked_seconds_floor`
     /// so a transient undercount can never manufacture a phantom deficit.
-    async fn maybe_prompt_time_loss(&self, now_npt: DateTime<FixedOffset>, cfg: &AppConfig) -> bool {
+    async fn maybe_prompt_time_loss(
+        &self,
+        now_npt: DateTime<FixedOffset>,
+        cfg: &AppConfig,
+    ) -> bool {
         let required = cfg.required_work_seconds(&self.break_configs.lock());
         if required <= 0 {
             return false;
@@ -676,9 +681,7 @@ impl Background {
         let mut stats = match pb.get_today_stats(&user_id).await {
             Ok(s) => s,
             Err(e) => {
-                log::warn!(
-                    "maybe_prompt_time_loss: get_today_stats failed ({e}), retrying once"
-                );
+                log::warn!("maybe_prompt_time_loss: get_today_stats failed ({e}), retrying once");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 match pb.get_today_stats(&user_id).await {
                     Ok(s) => s,
@@ -749,9 +752,8 @@ impl Background {
         if status == SessionStatus::Active {
             // Breaks queued while the user was already on break start first;
             // otherwise start whichever scheduled break is currently due.
-            let next = find_pending_auto_break(&configs, &pending).or_else(|| {
-                due_auto_breaks(&configs, &history).first().cloned()
-            });
+            let next = find_pending_auto_break(&configs, &pending)
+                .or_else(|| due_auto_breaks(&configs, &history).first().cloned());
             let Some(config) = next else { return };
             self.pending_auto_breaks.lock().remove(&config.id);
             let started = commands::start_break_internal(
@@ -966,7 +968,10 @@ fn ensure_local_bin_on_path(home: &std::path::Path, bin_dir: &std::path::Path) {
     }
 
     let line = format!("\n{MARKER}\nexport PATH=\"{}:$PATH\"\n", bin_dir.display());
-    let opened = fs::OpenOptions::new().create(true).append(true).open(&profile);
+    let opened = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&profile);
     match opened {
         Ok(mut f) => {
             if let Err(e) = f.write_all(line.as_bytes()) {

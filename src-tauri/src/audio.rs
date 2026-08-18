@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::time::Duration;
 
-use rodio::{DeviceSinkBuilder, Decoder, Source};
+use rodio::{Decoder, DeviceSinkBuilder, Source};
 
 /// Plays notification sounds directly through the OS audio device (ALSA/CoreAudio/WASAPI
 /// via rodio+cpal), bypassing the webview entirely. This avoids depending on WebKitGTK's

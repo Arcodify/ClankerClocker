@@ -3,10 +3,10 @@ use crate::session::{
     TodaySessionBreakdown, TodayStats,
 };
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PbAuthResponse {
@@ -176,6 +176,72 @@ impl PocketBase {
             )
             .await?;
         Ok(rec.id)
+    }
+
+    /// Finds the most recent still-open (active/on_break) session for a user,
+    /// if one exists on the server. Used to restore in-memory session state
+    /// after an app restart — without this, a restart while clocked in makes
+    /// the client think it's idle again: the clock-in reminder fires even
+    /// though the user never clocked out, and clocking in "again" creates a
+    /// second, duplicate work_sessions record alongside the still-open one.
+    pub async fn find_active_session(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::session::SessionState>> {
+        let filter = format!("user_id='{user_id}'&&(status='active'||status='on_break')");
+        let data = self
+            .get_list("work_sessions", &filter, "&sort=-clock_in&perPage=1")
+            .await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        let Some(item) = items.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let session_id = item["id"].as_str().unwrap_or("").to_string();
+        if session_id.is_empty() {
+            return Ok(None);
+        }
+        let status = match item["status"].as_str().unwrap_or("") {
+            "on_break" => SessionStatus::OnBreak,
+            _ => SessionStatus::Active,
+        };
+        let Some(clock_in) = Self::parse_pb_datetime(item["clock_in"].as_str().unwrap_or(""))
+        else {
+            return Ok(None);
+        };
+        let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
+        let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
+        let extended_past_schedule = item["extended_past_schedule"].as_bool().unwrap_or(false);
+
+        let (break_start, break_name) = if status == SessionStatus::OnBreak {
+            let filter = format!("session_id='{session_id}'&&end_time=''");
+            let breaks = self
+                .get_list("breaks", &filter, "&sort=-start_time&perPage=1")
+                .await
+                .ok()
+                .and_then(|d| d["items"].as_array().cloned())
+                .unwrap_or_default();
+            match breaks.into_iter().next() {
+                Some(b) => (
+                    Self::parse_pb_datetime(b["start_time"].as_str().unwrap_or("")),
+                    b["type"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                ),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        Ok(Some(crate::session::SessionState {
+            status,
+            session_id: Some(session_id),
+            clock_in: Some(clock_in),
+            break_start,
+            break_name,
+            total_break_seconds,
+            break_count,
+            extended_past_schedule,
+        }))
     }
 
     pub async fn get_company_settings(&self) -> Result<Value> {
@@ -568,14 +634,14 @@ impl PocketBase {
             tasks.spawn(async move {
                 let session_id = item["id"].as_str().unwrap_or("").to_string();
                 let user_id = item["user_id"].as_str().unwrap_or("").to_string();
-            let status_str = item["status"].as_str().unwrap_or("idle");
-            let status = match status_str {
-                "active" => SessionStatus::Active,
-                "on_break" => SessionStatus::OnBreak,
-                _ => SessionStatus::Idle,
-            };
+                let status_str = item["status"].as_str().unwrap_or("idle");
+                let status = match status_str {
+                    "active" => SessionStatus::Active,
+                    "on_break" => SessionStatus::OnBreak,
+                    _ => SessionStatus::Idle,
+                };
 
-            // Read name/email stored on session at clock-in (avoids cross-user PB access rules)
+                // Read name/email stored on session at clock-in (avoids cross-user PB access rules)
                 let mut user_name = item["user_name"].as_str().unwrap_or("").to_string();
                 let mut user_email = item["user_email"].as_str().unwrap_or("").to_string();
 
@@ -604,7 +670,8 @@ impl PocketBase {
                 }
 
                 let clock_in_str = item["clock_in"].as_str().unwrap_or("");
-                let clock_in = Self::parse_pb_datetime(clock_in_str).unwrap_or_else(chrono::Utc::now);
+                let clock_in =
+                    Self::parse_pb_datetime(clock_in_str).unwrap_or_else(chrono::Utc::now);
 
                 let total_break_seconds = item["total_break_seconds"].as_i64().unwrap_or(0);
                 let break_count = item["break_count"].as_u64().unwrap_or(0) as u32;
@@ -676,7 +743,11 @@ impl PocketBase {
     pub async fn get_session_snapshots(&self, session_id: &str) -> Result<Vec<ActivitySnapshot>> {
         let filter = format!("session_id='{session_id}'");
         let data = self
-            .get_list("activity_snapshots", &filter, "&sort=timestamp&perPage=2000")
+            .get_list(
+                "activity_snapshots",
+                &filter,
+                "&sort=timestamp&perPage=2000",
+            )
             .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
         let snaps = items
@@ -794,7 +865,11 @@ impl PocketBase {
             .iter()
             .filter_map(|item| {
                 let id = item["id"].as_str().unwrap_or("");
-                if id.is_empty() { None } else { Some(id.to_string()) }
+                if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                }
             })
             .collect();
 
@@ -827,7 +902,9 @@ impl PocketBase {
                     let bs = b["start_time"].as_str().unwrap_or("");
                     let be = b["end_time"].as_str().unwrap_or("");
                     let sid = b["session_id"].as_str().unwrap_or("").to_string();
-                    if bs.is_empty() || sid.is_empty() { continue; }
+                    if bs.is_empty() || sid.is_empty() {
+                        continue;
+                    }
                     if let Some(s) = Self::parse_pb_datetime(bs) {
                         let e = if be.is_empty() {
                             session_end_by
@@ -853,7 +930,9 @@ impl PocketBase {
         let mut net_loss_by: HashMap<String, i64> = HashMap::new();
         let mut needs_compute: Vec<String> = Vec::new();
         for item in &items {
-            let Some(sid) = item["id"].as_str() else { continue };
+            let Some(sid) = item["id"].as_str() else {
+                continue;
+            };
             let stamped = item["net_loss_seconds"].as_i64().unwrap_or(0);
             if stamped > 0 {
                 net_loss_by.insert(sid.to_string(), stamped);
@@ -898,9 +977,10 @@ impl PocketBase {
             .iter()
             .filter_map(|item| {
                 let session_id = item["id"].as_str()?.to_string();
-                if session_id.is_empty() { return None; }
-                let clock_in =
-                    Self::parse_pb_datetime(item["clock_in"].as_str().unwrap_or(""))?;
+                if session_id.is_empty() {
+                    return None;
+                }
+                let clock_in = Self::parse_pb_datetime(item["clock_in"].as_str().unwrap_or(""))?;
                 let clock_out_str = item["clock_out"].as_str().unwrap_or("");
                 let clock_out = if clock_out_str.is_empty() {
                     None
@@ -909,8 +989,7 @@ impl PocketBase {
                 };
                 let effective_end = clock_out.unwrap_or(now);
                 let gross_seconds = (effective_end - clock_in).num_seconds().max(0);
-                let break_seconds =
-                    break_secs_by.get(&session_id).copied().unwrap_or(0);
+                let break_seconds = break_secs_by.get(&session_id).copied().unwrap_or(0);
                 let net_seconds = (gross_seconds - break_seconds).max(0);
                 let net_loss_seconds = net_loss_by.get(&session_id).copied().unwrap_or(0);
                 let user_email = item["user_email"].as_str().unwrap_or("").to_string();
@@ -949,8 +1028,7 @@ impl PocketBase {
         user_id: Option<&str>,
     ) -> Result<crate::session::NetworkReport> {
         let sessions = self.get_sessions_in_range(from, to, user_id).await?;
-        let session_ids: Vec<String> =
-            sessions.iter().map(|s| s.session_id.clone()).collect();
+        let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
 
         let mut all_records: Vec<crate::session::NetworkRecord> = Vec::new();
         let mut host_counts: HashMap<String, u32> = HashMap::new();
@@ -973,12 +1051,9 @@ impl PocketBase {
                     };
                     let sid = item["session_id"].as_str().unwrap_or("").to_string();
                     let sess = sessions.iter().find(|s| s.session_id == sid);
-                    let remote_host =
-                        item["remote_host"].as_str().unwrap_or("").to_string();
-                    let remote_ip =
-                        item["remote_ip"].as_str().unwrap_or("").to_string();
-                    let process_name =
-                        item["process_name"].as_str().unwrap_or("").to_string();
+                    let remote_host = item["remote_host"].as_str().unwrap_or("").to_string();
+                    let remote_ip = item["remote_ip"].as_str().unwrap_or("").to_string();
+                    let process_name = item["process_name"].as_str().unwrap_or("").to_string();
 
                     let host_key = if !remote_host.is_empty() {
                         remote_host.clone()
@@ -994,15 +1069,9 @@ impl PocketBase {
 
                     all_records.push(crate::session::NetworkRecord {
                         timestamp,
-                        user_id: sess
-                            .map(|s| s.user_id.clone())
-                            .unwrap_or_default(),
-                        user_name: sess
-                            .map(|s| s.user_name.clone())
-                            .unwrap_or_default(),
-                        user_email: sess
-                            .map(|s| s.user_email.clone())
-                            .unwrap_or_default(),
+                        user_id: sess.map(|s| s.user_id.clone()).unwrap_or_default(),
+                        user_name: sess.map(|s| s.user_name.clone()).unwrap_or_default(),
+                        user_email: sess.map(|s| s.user_email.clone()).unwrap_or_default(),
                         session_id: sid,
                         process_name,
                         remote_host,
@@ -1040,8 +1109,7 @@ impl PocketBase {
         user_id: &str,
     ) -> Result<crate::session::ActivityReport> {
         let sessions = self.get_sessions_in_range(from, to, Some(user_id)).await?;
-        let session_ids: Vec<String> =
-            sessions.iter().map(|s| s.session_id.clone()).collect();
+        let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
         let session_count = session_ids.len() as u32;
 
         let mut total_keystrokes: u64 = 0;

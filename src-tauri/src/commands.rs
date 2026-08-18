@@ -252,10 +252,7 @@ pub async fn clock_out_internal(
     // closed automatically by close_stale_sessions() on the next clock-in.
     if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
         let pb = PocketBase::new(pb_url, pb_token);
-        let extra_break_seconds = pb
-            .close_open_breaks(&session_id, &now)
-            .await
-            .unwrap_or(0);
+        let extra_break_seconds = pb.close_open_breaks(&session_id, &now).await.unwrap_or(0);
         let total = total_break_seconds + extra_break_seconds;
         if let Err(e) = pb
             .close_session(&session_id, &now, total, early_clockout_reason)
@@ -367,7 +364,45 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, Str
 }
 
 #[tauri::command]
-pub async fn get_session_state(state: State<'_, AppState>) -> Result<SessionState, String> {
+pub async fn get_session_state(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SessionState, String> {
+    // The in-memory session always starts Idle on process start, so a crash
+    // or restart while clocked in otherwise looks identical to never having
+    // clocked in: the clock-in reminder fires again, and clocking back in
+    // creates a second work_sessions record on top of the one still open on
+    // the server. Reconcile against PocketBase once, here, before trusting
+    // the local Idle default.
+    let (status, pb_url, pb_token, user_id) = {
+        let sess = state.session.lock();
+        let cfg = state.config.lock();
+        (
+            sess.status.clone(),
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            cfg.user_id.clone(),
+        )
+    };
+    if status == SessionStatus::Idle && !pb_url.is_empty() && !pb_token.is_empty() && !user_id.is_empty() {
+        let pb = PocketBase::new(pb_url, pb_token);
+        if let Ok(Some(restored)) = pb.find_active_session(&user_id).await {
+            let mut sess = state.session.lock();
+            // Only apply if still idle — avoid clobbering a clock-in that
+            // happened locally while this lookup was in flight.
+            if sess.status == SessionStatus::Idle {
+                *sess = restored;
+                update_tray(
+                    &app,
+                    match sess.status {
+                        SessionStatus::Active => "active",
+                        SessionStatus::OnBreak => "break",
+                        SessionStatus::Idle => "idle",
+                    },
+                );
+            }
+        }
+    }
     Ok(state.session.lock().clone())
 }
 
@@ -662,7 +697,11 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             // Self-exemption: an external-staff user has no required hours
             // for their own dashboard, even though the company schedule
             // itself is a shared, non-zero value used for everyone else.
-            if cfg.is_external_staff { 0 } else { cfg.required_work_seconds(&breaks) },
+            if cfg.is_external_staff {
+                0
+            } else {
+                cfg.required_work_seconds(&breaks)
+            },
             elapsed,
             sess.total_break_seconds,
             sess.break_count,
@@ -1014,6 +1053,70 @@ pub async fn clear_auth(state: State<'_, AppState>) -> Result<(), String> {
     state.db.lock().save_config(&cfg).map_err(|e| e.to_string())
 }
 
+/// Manually pushes a one-off activity snapshot built from the given
+/// keystrokes/mouse_clicks totals, through the same push-or-queue path
+/// `Background::push_activity_snapshot` uses for the real 30s snapshots.
+/// Wired to the in-app `lestercity2` test shortcut so the PocketBase sync
+/// path can be exercised on demand instead of waiting for a real session.
+#[tauri::command]
+pub async fn push_test_activity_snapshot(
+    state: State<'_, AppState>,
+    keystrokes: u64,
+    mouse_clicks: u64,
+) -> Result<(), String> {
+    // The local auto-clockout timer (Background::tick_idle_clockout) only
+    // ever looks at ActivityCounters.last_activity, which is normally
+    // stamped by the real OS-level input monitor. Pushing a synthetic
+    // snapshot to PocketBase doesn't touch that, so without this the
+    // repeating lestercity2 loop keeps the server-side "offline" check happy
+    // while the on-device idle timer keeps climbing in the background and
+    // auto-clocks the session out anyway. Treat a manual push as real
+    // activity so the two stay consistent.
+    state.counters.lock().last_activity = Some(std::time::Instant::now());
+
+    let (pb_url, pb_token, session_id) = {
+        let cfg = state.config.lock();
+        let sess = state.session.lock();
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            sess.session_id.clone(),
+        )
+    };
+    let Some(sid) = session_id else {
+        return Err("no active session to attach the snapshot to".into());
+    };
+
+    let snap = ActivitySnapshot {
+        timestamp: Utc::now(),
+        keystrokes,
+        mouse_clicks,
+        mouse_distance_px: 0.0,
+        active_app: "Nvim".into(),
+        active_window: "neovim".into(),
+        idle_seconds: 0,
+        in_call: false,
+    };
+
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return state
+            .db
+            .lock()
+            .queue_snapshot(&sid, &snap)
+            .map_err(|e| e.to_string());
+    }
+
+    let pb = PocketBase::new(pb_url, pb_token);
+    if pb.push_snapshot(&sid, &snap).await.is_err() {
+        state
+            .db
+            .lock()
+            .queue_snapshot(&sid, &snap)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_all_users(state: State<'_, AppState>) -> Result<Vec<UserInfo>, String> {
     let (pb_url, pb_token) = {
@@ -1091,18 +1194,20 @@ pub async fn get_time_summary(
     let mut day_net: HashMap<(String, String), i64> = HashMap::new();
 
     for s in &sessions {
-        let e = by_user.entry(s.user_id.clone()).or_insert_with(|| UserSummary {
-            user_id: s.user_id.clone(),
-            user_name: s.user_name.clone(),
-            user_email: s.user_email.clone(),
-            session_count: 0,
-            days_present: 0,
-            total_work_seconds: 0,
-            total_break_seconds: 0,
-            total_gross_seconds: 0,
-            total_net_loss_seconds: 0,
-            total_time_loss_seconds: 0,
-        });
+        let e = by_user
+            .entry(s.user_id.clone())
+            .or_insert_with(|| UserSummary {
+                user_id: s.user_id.clone(),
+                user_name: s.user_name.clone(),
+                user_email: s.user_email.clone(),
+                session_count: 0,
+                days_present: 0,
+                total_work_seconds: 0,
+                total_break_seconds: 0,
+                total_gross_seconds: 0,
+                total_net_loss_seconds: 0,
+                total_time_loss_seconds: 0,
+            });
         e.session_count += 1;
         e.total_work_seconds += s.net_seconds;
         e.total_break_seconds += s.break_seconds;
@@ -1113,7 +1218,10 @@ pub async fn get_time_summary(
             .with_timezone(&nepal)
             .format("%Y-%m-%d")
             .to_string();
-        user_days.entry(s.user_id.clone()).or_default().insert(date.clone());
+        user_days
+            .entry(s.user_id.clone())
+            .or_default()
+            .insert(date.clone());
         *day_net.entry((s.user_id.clone(), date)).or_insert(0) += s.net_seconds;
     }
     for (uid, summary) in by_user.iter_mut() {
