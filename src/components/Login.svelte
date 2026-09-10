@@ -1,7 +1,14 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, authToken, userId, isAdmin, userName, errorMessage } from "../lib/stores";
+  import {
+    settings,
+    authToken,
+    userId,
+    isAdmin,
+    userName,
+    errorMessage,
+  } from "../lib/stores";
 
   const dispatch = createEventDispatcher();
 
@@ -10,6 +17,7 @@
   let pbPassword = "";
   let loading = false;
   let showAdvanced = !pbUrl;
+  let showPassword = false;
 
   onMount(async () => {
     // Load default URL from Rust config constant if nothing saved yet
@@ -38,7 +46,12 @@
         is_admin: boolean;
       }>("authenticate_pb", { pbUrl, pbEmail, pbPassword });
 
-      settings.update((s) => ({ ...s, pb_url: pbUrl, pb_email: pbEmail, is_admin: result.is_admin }));
+      settings.update((s) => ({
+        ...s,
+        pb_url: pbUrl,
+        pb_email: pbEmail,
+        is_admin: result.is_admin,
+      }));
       authToken.set(result.token);
       userId.set(result.user_id);
       userName.set(result.user_name || result.user_email);
@@ -62,20 +75,40 @@
   <div class="form">
     <label>
       <span>Email</span>
-      <input bind:value={pbEmail} placeholder="you@company.com" type="email" autocomplete="off" />
+      <input
+        bind:value={pbEmail}
+        placeholder="you@company.com"
+        type="email"
+        autocomplete="off"
+      />
     </label>
     <label>
       <span>Password</span>
-      <input
-        bind:value={pbPassword}
-        placeholder="••••••••"
-        type="password"
-        autocomplete="new-password"
-        on:keydown={(e) => e.key === "Enter" && connect()}
-      />
+      <div class="password-wrapper">
+        <input
+          bind:value={pbPassword}
+          placeholder="••••••••"
+          type={showPassword ? "text" : "password"}
+          autocomplete="new-password"
+          on:keydown={(e) => e.key === "Enter" && connect()}
+        />
+
+        <button
+          type="button"
+          class="password-toggle"
+          on:click={() => (showPassword = !showPassword)}
+          aria-label={showPassword ? "Hide password" : "Show password"}
+        >
+          {showPassword ? "◉" : "◌"}
+        </button>
+      </div>
     </label>
 
-    <button class="advanced-toggle" type="button" on:click={() => (showAdvanced = !showAdvanced)}>
+    <button
+      class="advanced-toggle"
+      type="button"
+      on:click={() => (showAdvanced = !showAdvanced)}
+    >
       {showAdvanced ? "Hide advanced" : "Advanced"}
     </button>
 
@@ -117,14 +150,45 @@
     padding: 28px 24px;
     gap: 28px;
   }
-  .logo { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .logo-icon { font-size: 38px; line-height: 1; }
-  .logo-name { font-size: 20px; font-weight: 700; color: #f0f0f5; letter-spacing: 0.5px; }
-  .logo-sub { font-size: 12px; color: #4a4a62; }
+  .logo {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  .logo-icon {
+    font-size: 38px;
+    line-height: 1;
+  }
+  .logo-name {
+    font-size: 20px;
+    font-weight: 700;
+    color: #f0f0f5;
+    letter-spacing: 0.5px;
+  }
+  .logo-sub {
+    font-size: 12px;
+    color: #4a4a62;
+  }
 
-  .form { width: 100%; display: flex; flex-direction: column; gap: 11px; }
-  label { display: flex; flex-direction: column; gap: 4px; }
-  label span { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.7px; color: #4a4a62; }
+  .form {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+  }
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  label span {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: #4a4a62;
+  }
   input {
     background: #13131a;
     border: 1px solid #252530;
@@ -136,7 +200,9 @@
     width: 100%;
     transition: border-color 0.15s;
   }
-  input:focus { border-color: #6366f1; }
+  input:focus {
+    border-color: #6366f1;
+  }
 
   .btn-connect {
     background: #6366f1;
@@ -150,8 +216,13 @@
     margin-top: 4px;
     transition: background 0.15s;
   }
-  .btn-connect:hover:not(:disabled) { background: #4f46e5; }
-  .btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-connect:hover:not(:disabled) {
+    background: #4f46e5;
+  }
+  .btn-connect:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   .advanced-toggle {
     align-self: flex-start;
@@ -162,7 +233,9 @@
     padding: 0;
     cursor: pointer;
   }
-  .advanced-toggle:hover { color: #a0a0bc; }
+  .advanced-toggle:hover {
+    color: #a0a0bc;
+  }
 
   .divider {
     text-align: center;
@@ -171,16 +244,21 @@
     position: relative;
     margin: 2px 0;
   }
-  .divider::before, .divider::after {
-    content: '';
+  .divider::before,
+  .divider::after {
+    content: "";
     position: absolute;
     top: 50%;
     width: 44%;
     height: 1px;
     background: #1e1e28;
   }
-  .divider::before { left: 0; }
-  .divider::after { right: 0; }
+  .divider::before {
+    left: 0;
+  }
+  .divider::after {
+    right: 0;
+  }
 
   .btn-skip {
     background: transparent;
@@ -192,7 +270,36 @@
     cursor: pointer;
     transition: all 0.15s;
   }
-  .btn-skip:hover { border-color: #3a3a52; color: #8080a0; }
+  .btn-skip:hover {
+    border-color: #3a3a52;
+    color: #8080a0;
+  }
 
-  .offline-note { font-size: 11px; color: #2e2e42; text-align: center; line-height: 1.5; }
+  .offline-note {
+    font-size: 11px;
+    color: #2e2e42;
+    text-align: center;
+    line-height: 1.5;
+  }
+
+  .password-wrapper {
+    position: relative;
+  }
+
+  .password-wrapper input {
+    width: 100%;
+    padding-right: 40px;
+  }
+
+  .password-toggle {
+    position: absolute;
+    font-size: 24px;
+    right: 10px;
+    color: white;
+    top: 50%;
+    transform: translateY(-60%);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
 </style>
