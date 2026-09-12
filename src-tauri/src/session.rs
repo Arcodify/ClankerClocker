@@ -105,21 +105,6 @@ pub struct BreakConfig {
     pub auto_end_time: Option<String>,
 }
 
-/// Total seconds of scheduled auto-break windows (auto_start → auto_end).
-/// Configs without auto-start or with unparsable times contribute nothing.
-pub fn scheduled_break_seconds(configs: &[BreakConfig]) -> i64 {
-    let parse = |v: &str| chrono::NaiveTime::parse_from_str(v, "%H:%M").ok();
-    configs
-        .iter()
-        .filter(|c| c.auto_start_enabled)
-        .filter_map(|c| {
-            let start = parse(c.auto_start_time.as_deref()?)?;
-            let end = parse(c.auto_end_time.as_deref()?)?;
-            Some((end - start).num_seconds().max(0))
-        })
-        .sum()
-}
-
 impl BreakConfig {
     pub fn defaults() -> Vec<Self> {
         vec![
@@ -169,6 +154,10 @@ pub struct TodayStats {
     /// staff, who have no fixed schedule.
     #[serde(default)]
     pub required_seconds: i64,
+    /// Remaining scheduled work for today. This is calculated by the backend
+    /// from the same total returned above so every view shows one value.
+    #[serde(default)]
+    pub time_loss_seconds: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +200,10 @@ pub struct TeamMember {
     /// Totals across all of this member's sessions today (Nepal time), including the current one.
     pub today_total_work_seconds: i64,
     pub today_total_break_seconds: i64,
+    /// Backend-calculated remaining work for today; do not recompute this in
+    /// the admin UI from a separately cached schedule.
+    #[serde(default)]
+    pub today_time_loss_seconds: i64,
     #[serde(default)]
     pub is_external_staff: bool,
     /// Whether this member's mic was active as of the most recent snapshot.
@@ -262,17 +255,17 @@ impl AppConfig {
     /// unparsable. Callers must apply any per-employee external-staff
     /// exemption themselves (see `get_today_stats`/`get_time_summary`).
     pub fn required_seconds(&self) -> i64 {
-        let parse = |v: &str| chrono::NaiveTime::parse_from_str(v, "%H:%M").ok();
-        match (parse(&self.clock_in_time), parse(&self.clock_out_time)) {
-            (Some(start), Some(end)) => (end - start).num_seconds().max(0),
-            _ => 0,
-        }
+        crate::domain::schedule::scheduled_work_seconds(&self.clock_in_time, &self.clock_out_time)
     }
 
     /// Required work seconds per day: the schedule span minus scheduled
     /// auto-break windows (breaks don't count toward required hours).
     pub fn required_work_seconds(&self, breaks: &[BreakConfig]) -> i64 {
-        (self.required_seconds() - scheduled_break_seconds(breaks)).max(0)
+        crate::domain::schedule::required_work_seconds(
+            &self.clock_in_time,
+            &self.clock_out_time,
+            breaks,
+        )
     }
 }
 

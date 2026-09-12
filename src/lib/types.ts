@@ -38,6 +38,8 @@ export interface TodayStats {
   total_net_loss_seconds: number;
   /** Scheduled work seconds for today (clock_in_time → clock_out_time); 0 for external staff. */
   required_seconds: number;
+  /** Backend-calculated remaining required work for today. */
+  time_loss_seconds: number;
 }
 
 /** Payload of the "time-loss-prompt" event emitted at scheduled clock-out
@@ -79,6 +81,7 @@ export interface TeamMember {
   active_window_title: string;
   today_total_work_seconds: number;
   today_total_break_seconds: number;
+  today_time_loss_seconds: number;
   is_external_staff: boolean;
   in_call: boolean;
 }

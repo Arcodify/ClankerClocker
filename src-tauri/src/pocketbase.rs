@@ -2,6 +2,7 @@ use crate::session::{
     ActivitySnapshot, BreakConfig, NetworkConnection, SessionStatus, TeamMember, TodayBreakdown,
     TodaySessionBreakdown, TodayStats,
 };
+use crate::domain::schedule;
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,18 @@ impl PocketBase {
             return Err(anyhow!("No company settings found"));
         }
         Ok(items[0].clone())
+    }
+
+    /// Reads the company schedule and scheduled breaks from PocketBase. This
+    /// is the source used for live Time Loss, rather than a schedule cached in
+    /// whichever desktop app happens to be displaying the value.
+    pub async fn get_required_work_seconds(&self) -> Result<i64> {
+        let (settings, breaks) = tokio::try_join!(self.get_company_settings(), self.get_break_configs())?;
+        Ok(schedule::required_work_seconds(
+            settings["clock_in_time"].as_str().unwrap_or(""),
+            settings["clock_out_time"].as_str().unwrap_or(""),
+            &breaks,
+        ))
     }
 
     pub async fn update_company_settings(
@@ -587,7 +600,8 @@ impl PocketBase {
             break_count: data.break_count,
             total_break_seconds: data.total_break_seconds,
             total_net_loss_seconds: data.total_net_loss_seconds,
-            required_seconds: 0, // filled by the commands layer from AppConfig
+            required_seconds: 0,  // filled by the commands layer from AppConfig
+            time_loss_seconds: 0, // filled by the commands layer from AppConfig
         })
     }
 
@@ -695,6 +709,7 @@ impl PocketBase {
                         active_window_title,
                         today_total_work_seconds,
                         today_total_break_seconds,
+                        today_time_loss_seconds: 0,
                         is_external_staff,
                         in_call,
                     },

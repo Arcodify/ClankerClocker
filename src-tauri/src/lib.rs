@@ -2,6 +2,7 @@ mod audio;
 mod commands;
 pub mod config;
 mod db;
+mod domain;
 mod monitor;
 mod pocketbase;
 mod session;

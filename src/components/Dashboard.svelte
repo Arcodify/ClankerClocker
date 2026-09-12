@@ -19,10 +19,14 @@
   let earlyOutDeficit = 0;
   let breakConfigs: BreakConfig[] = [];
 
-  // Net work seconds of the *current* open session: ticks live while active,
-  // frozen at the moment a break starts (the "active" branch below re-syncs
-  // it from clock_in once the break ends). $elapsedSeconds is a single
-  // shared 1Hz tick driven from App.svelte and reused for both meanings.
+  // Today's work and time loss are server-authoritative. The backend includes
+  // the open session through "now", so the employee and admin use identical
+  // totals rather than combining different local timers and cached settings.
+  $: totalTimeTodaySeconds = $todayStats?.total_work_seconds ?? 0;
+  $: totalBreakTodaySeconds = $todayStats?.total_break_seconds ?? 0;
+
+  // Kept only for the session timer and active-break countdown. These values
+  // never participate in today's totals or Time Loss.
   $: sessionWorkSeconds = $session.status === "active"
     ? $elapsedSeconds
     : $session.status === "on_break" && $session.break_start && $session.clock_in
@@ -30,26 +34,10 @@
           (new Date($session.break_start).getTime() - new Date($session.clock_in).getTime()) / 1000
         ) - $session.total_break_seconds)
       : 0;
-
-  // Today's totals baseline (from the last refreshTodayStats() fetch) plus
-  // the live current-session delta, so these tick in real time without
-  // repolling. The backend (commands::get_today_stats) excludes whichever
-  // session is still open from this baseline specifically so it's safe to
-  // add sessionWorkSeconds/currentBreakElapsed here without double-counting
-  // it — don't remove that exclusion without updating this math too.
-  $: totalTimeTodaySeconds = ($todayStats?.total_work_seconds ?? 0) + sessionWorkSeconds;
-
   $: currentBreakElapsed = $session.status === "on_break" ? $elapsedSeconds : 0;
-  $: totalBreakTodaySeconds = ($todayStats?.total_break_seconds ?? 0)
-    + $session.total_break_seconds + currentBreakElapsed;
 
-  // The instant clock_out flips $session.status to "idle", sessionWorkSeconds
-  // collapses to 0 while $todayStats still holds its pre-clockout baseline
-  // (which excludes the just-closed session's time by design — see the note
-  // above totalTimeTodaySeconds) — so the "Today" card would flash down to a
-  // too-low number for the moment between that status flip and the
-  // post-clockout refreshTodayStats() landing. Freeze the displayed totals at
-  // their last live value through that window instead of showing the dip.
+  // Keep the last visible values during the clock-out request so the summary
+  // does not briefly change before its authoritative refresh completes.
   let clockingOut = false;
   let frozenTotalTimeTodaySeconds = 0;
   let frozenTotalBreakTodaySeconds = 0;
@@ -70,12 +58,11 @@
   $: breakRemaining = breakDurationSeconds > 0 ? breakDurationSeconds - currentBreakElapsed : null;
   $: breakOvertime = breakRemaining !== null && breakRemaining < 0;
 
-  $: deficitSeconds = $todayStats && $todayStats.required_seconds > 0
-    ? Math.max(0, $todayStats.required_seconds - totalTimeTodaySeconds)
-    : 0;
+  $: deficitSeconds = $todayStats?.time_loss_seconds ?? 0;
 
   let liveCounters: LiveCounters | null = null;
   let unlisten: (() => void) | null = null;
+  let statsInterval: ReturnType<typeof setInterval> | null = null;
 
   let updateVersion: string | null = null;
   let updateInstalling = false;
@@ -115,6 +102,10 @@
     await refreshTodayStats();
     await loadBreakConfigs();
 
+    // Match the admin live refresh cadence. This changes only display data;
+    // the calculation itself remains in the backend.
+    statsInterval = setInterval(refreshTodayStats, 30_000);
+
     unlisten = await listen<LiveCounters>("live-counters", (e) => {
       liveCounters = e.payload;
     });
@@ -126,6 +117,7 @@
 
   onDestroy(() => {
     unlisten?.();
+    if (statsInterval) clearInterval(statsInterval);
   });
 
   $: if ($session.status === "idle") {
@@ -187,9 +179,7 @@
       invoke<TodayStats>("get_today_stats")
         .then((stats) => {
           todayStats.set(stats);
-          const fresh = stats.required_seconds > 0
-            ? Math.max(0, stats.required_seconds - stats.total_work_seconds)
-            : 0;
+          const fresh = stats.time_loss_seconds;
           if (showEarlyOutDialog && fresh >= 60) {
             earlyOutDeficit = fresh;
           }

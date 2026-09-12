@@ -647,7 +647,7 @@
           <div class="sum-card"><span class="sumv">{elapsed(liveSelected.clock_in, tickerNow)}</span><span class="suml">Since In</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_work_seconds)}</span><span class="suml">Today Work</span></div>
           <div class="sum-card"><span class="sumv">{hhmm(liveSelected.today_total_break_seconds)}</span><span class="suml">Today Break</span></div>
-          <div class="sum-card"><span class="sumv">{liveSelected.is_external_staff ? "—" : hhmm(Math.max(0, requiredSeconds - liveSelected.today_total_work_seconds))}</span><span class="suml">Today Time Loss</span></div>
+          <div class="sum-card"><span class="sumv">{liveSelected.is_external_staff ? "—" : hhmm(liveSelected.today_time_loss_seconds)}</span><span class="suml">Today Time Loss</span></div>
           <div class="sum-card"><span class="sumv">{liveSelected.break_count}</span><span class="suml">Breaks</span></div>
         </div>
         <div class="tabs">

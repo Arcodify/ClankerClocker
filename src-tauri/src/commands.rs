@@ -1,4 +1,5 @@
 use crate::config::DEFAULT_PB_URL;
+use crate::domain::time_loss::calculate as calculate_time_loss;
 use crate::pocketbase::PocketBase;
 use crate::session::{
     ActivityCounters, ActivityReport, ActivitySnapshot, AppNotification, BreakConfig,
@@ -677,11 +678,10 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
         pb_url,
         pb_token,
         user_id,
-        required_seconds,
+        cached_required_seconds,
         sess_elapsed,
         sess_break_secs,
         sess_break_count,
-        open_session_id,
     ) = {
         let cfg = state.config.lock();
         let sess = state.session.lock();
@@ -705,13 +705,6 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             elapsed,
             sess.total_break_seconds,
             sess.break_count,
-            // The dashboard adds its own live-ticking elapsed/break time for
-            // the session that's still open on top of whatever this returns,
-            // so that session's contribution must be excluded below —
-            // otherwise it gets counted twice (backend total + live delta).
-            (sess.status != SessionStatus::Idle)
-                .then(|| sess.session_id.clone())
-                .flatten(),
         )
     };
 
@@ -724,39 +717,42 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             break_count: sess_break_count,
             total_break_seconds: sess_break_secs,
             total_net_loss_seconds: 0,
-            required_seconds,
+            required_seconds: cached_required_seconds,
+            time_loss_seconds: calculate_time_loss(cached_required_seconds, work_secs, false).seconds,
         });
     }
 
     let pb = PocketBase::new(pb_url, pb_token);
+    let required_seconds = if cached_required_seconds == 0 {
+        0
+    } else {
+        pb.get_required_work_seconds()
+            .await
+            .unwrap_or(cached_required_seconds)
+    };
     let breakdown = pb
         .get_today_breakdown(&user_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut total_work_seconds = breakdown.total_work_seconds;
-    let mut total_break_seconds = breakdown.total_break_seconds;
-    let mut total_net_loss_seconds = breakdown.total_net_loss_seconds;
-    let mut break_count = breakdown.break_count;
-    let mut session_count = breakdown.session_count;
-
-    if let Some(sid) = open_session_id {
-        if let Some(cur) = breakdown.sessions.iter().find(|s| s.session_id == sid) {
-            total_work_seconds -= cur.net_seconds;
-            total_break_seconds -= cur.break_seconds;
-            total_net_loss_seconds -= cur.net_loss_seconds;
-            break_count = break_count.saturating_sub(cur.break_count);
-            session_count = session_count.saturating_sub(1);
-        }
-    }
+    // PocketBase calculates open sessions through the current instant, so its
+    // totals are authoritative. Do not remove the current session here and
+    // re-add a local browser timer: that gave the user and admin two distinct
+    // time-loss calculations.
+    let total_work_seconds = breakdown.total_work_seconds.max(0);
+    let total_break_seconds = breakdown.total_break_seconds.max(0);
+    let total_net_loss_seconds = breakdown.total_net_loss_seconds.max(0);
+    let break_count = breakdown.break_count;
+    let session_count = breakdown.session_count;
 
     Ok(TodayStats {
         session_count,
-        total_work_seconds: total_work_seconds.max(0),
+        total_work_seconds,
         break_count,
-        total_break_seconds: total_break_seconds.max(0),
-        total_net_loss_seconds: total_net_loss_seconds.max(0),
+        total_break_seconds,
+        total_net_loss_seconds,
         required_seconds,
+        time_loss_seconds: calculate_time_loss(required_seconds, total_work_seconds, false).seconds,
     })
 }
 
@@ -780,15 +776,33 @@ pub async fn get_user_today_breakdown(
 
 #[tauri::command]
 pub async fn get_team_status(state: State<'_, AppState>) -> Result<Vec<TeamMember>, String> {
-    let (pb_url, pb_token) = {
+    let (pb_url, pb_token, cached_required_seconds) = {
         let cfg = state.config.lock();
-        (cfg.pb_url.clone(), cfg.pb_token.clone())
+        let breaks = state.break_configs.lock();
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            cfg.required_work_seconds(&breaks),
+        )
     };
     if pb_url.is_empty() || pb_token.is_empty() {
         return Err("Not connected to PocketBase".into());
     }
     let pb = PocketBase::new(pb_url, pb_token);
-    pb.get_team_status().await.map_err(|e| e.to_string())
+    let required_seconds = pb
+        .get_required_work_seconds()
+        .await
+        .unwrap_or(cached_required_seconds);
+    let mut members = pb.get_team_status().await.map_err(|e| e.to_string())?;
+    for member in &mut members {
+        member.today_time_loss_seconds = calculate_time_loss(
+            required_seconds,
+            member.today_total_work_seconds,
+            member.is_external_staff,
+        )
+        .seconds;
+    }
+    Ok(members)
 }
 
 #[tauri::command]
