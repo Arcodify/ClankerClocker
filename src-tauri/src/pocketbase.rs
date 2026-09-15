@@ -1,8 +1,8 @@
+use crate::domain::schedule;
 use crate::session::{
     ActivitySnapshot, BreakConfig, NetworkConnection, SessionStatus, TeamMember, TodayBreakdown,
     TodaySessionBreakdown, TodayStats,
 };
-use crate::domain::schedule;
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,8 @@ pub struct PbUserRecord {
     pub clock_out_time: String,
     #[serde(default)]
     pub auto_clock_out_enabled: bool,
+    #[serde(default)]
+    pub apis: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -225,7 +227,10 @@ impl PocketBase {
             match breaks.into_iter().next() {
                 Some(b) => (
                     Self::parse_pb_datetime(b["start_time"].as_str().unwrap_or("")),
-                    b["type"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                    b["type"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
                 ),
                 None => (None, None),
             }
@@ -261,12 +266,31 @@ impl PocketBase {
     /// is the source used for live Time Loss, rather than a schedule cached in
     /// whichever desktop app happens to be displaying the value.
     pub async fn get_required_work_seconds(&self) -> Result<i64> {
-        let (settings, breaks) = tokio::try_join!(self.get_company_settings(), self.get_break_configs())?;
+        let (settings, breaks) =
+            tokio::try_join!(self.get_company_settings(), self.get_break_configs())?;
         Ok(schedule::required_work_seconds(
             settings["clock_in_time"].as_str().unwrap_or(""),
             settings["clock_out_time"].as_str().unwrap_or(""),
             &breaks,
         ))
+    }
+
+    pub async fn add_user_apis(&self, id: &str, key: &str, value: &str) -> Result<()> {
+        let mut apis = self.get_user_record(id).await?.apis;
+        if !apis.is_object() {
+            apis = json!({});
+        }
+
+        apis[key] = json!(value);
+
+        self.patch(
+            "users",
+            id,
+            json!({
+                "apis": apis
+            }),
+        )
+        .await
     }
 
     pub async fn update_company_settings(

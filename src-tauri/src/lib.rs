@@ -4,6 +4,7 @@ pub mod config;
 mod db;
 mod domain;
 mod monitor;
+mod pm;
 mod pocketbase;
 mod session;
 
@@ -44,6 +45,12 @@ pub struct AppState {
 
 pub fn run() {
     env_logger::init();
+
+    let planed = pm::plane::Plane::new("test".to_string(), "test".to_string(), "test".to_string());
+
+    tauri::async_runtime::spawn(async move {
+        planed.is_plane_user().await;
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -269,6 +276,7 @@ pub fn run() {
             commands::clock_out,
             commands::extend_session,
             commands::set_user_external_staff,
+            commands::add_api_key,
             commands::start_break,
             commands::end_break,
             commands::get_today_stats,

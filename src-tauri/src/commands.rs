@@ -385,7 +385,11 @@ pub async fn get_session_state(
             cfg.user_id.clone(),
         )
     };
-    if status == SessionStatus::Idle && !pb_url.is_empty() && !pb_token.is_empty() && !user_id.is_empty() {
+    if status == SessionStatus::Idle
+        && !pb_url.is_empty()
+        && !pb_token.is_empty()
+        && !user_id.is_empty()
+    {
         let pb = PocketBase::new(pb_url, pb_token);
         if let Ok(Some(restored)) = pb.find_active_session(&user_id).await {
             let mut sess = state.session.lock();
@@ -637,6 +641,36 @@ pub async fn set_user_external_staff(
 }
 
 #[tauri::command]
+pub async fn add_api_key(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let (pb_url, pb_token, user_id) = {
+        let cfg = state.config.lock();
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            cfg.user_id.clone(),
+        )
+    };
+
+    if pb_url.is_empty() || pb_token.is_empty() || user_id.is_empty() {
+        return Err("Not authenticated".into());
+    }
+
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("API key name is required".into());
+    }
+
+    PocketBase::new(pb_url, pb_token)
+        .add_user_apis(&user_id, key, value.trim())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn start_break(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -718,7 +752,8 @@ pub async fn get_today_stats(state: State<'_, AppState>) -> Result<TodayStats, S
             total_break_seconds: sess_break_secs,
             total_net_loss_seconds: 0,
             required_seconds: cached_required_seconds,
-            time_loss_seconds: calculate_time_loss(cached_required_seconds, work_secs, false).seconds,
+            time_loss_seconds: calculate_time_loss(cached_required_seconds, work_secs, false)
+                .seconds,
         });
     }
 
