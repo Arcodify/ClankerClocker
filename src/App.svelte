@@ -488,6 +488,14 @@
     margin: 0;
     padding: 0;
   }
+  :global(html) {
+    /* App is always-dark — without this, WebKitGTK renders native
+       controls (select option popups, etc.) with light-theme defaults
+       regardless of a component's own CSS, reading as unreadable
+       black-on-black text. This is the app-wide fallback; individual
+       components still set it explicitly on their own selects too. */
+    color-scheme: dark;
+  }
   :global(body) {
     font-family: "Inter", system-ui, sans-serif;
     background: #0d0d0f;

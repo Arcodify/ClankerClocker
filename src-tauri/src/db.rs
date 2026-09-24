@@ -69,6 +69,22 @@ impl LocalDb {
                 params![k, v],
             )?;
         }
+        // PM integration settings, serialized separately since pm_config is
+        // a JSON blob (workspace_slug/base_url), not a plain string like the
+        // fields above.
+        self.conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params!["pm_enabled", &cfg.pm_enabled.to_string()],
+        )?;
+        self.conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![
+                "pm_config",
+                &serde_json::to_string(&cfg.pm_config).unwrap_or_else(|_| "{}".to_string())
+            ],
+        )?;
         Ok(())
     }
 
@@ -92,6 +108,12 @@ impl LocalDb {
                 "clock_out_time" => cfg.clock_out_time = row.1,
                 "auto_clock_out_enabled" => cfg.auto_clock_out_enabled = row.1 != "false",
                 "token_saved_at" => cfg.token_saved_at = row.1,
+                "pm_enabled" => cfg.pm_enabled = row.1 == "true",
+                "pm_config" => {
+                    if let Ok(v) = serde_json::from_str(&row.1) {
+                        cfg.pm_config = v;
+                    }
+                }
                 _ => {}
             }
         }

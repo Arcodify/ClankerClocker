@@ -139,6 +139,16 @@
     outline: none;
     width: 100%;
   }
+  /* Without color-scheme: dark, WebKitGTK renders the native option
+     popup with its light-theme defaults regardless of the control's own
+     CSS, which reads as unreadable black-on-black text. */
+  select {
+    color-scheme: dark;
+  }
+  select option {
+    background: #13131a;
+    color: #e0e0ec;
+  }
   input:focus,
   select:focus { border-color: #6366f1; }
 
