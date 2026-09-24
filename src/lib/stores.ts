@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { SessionState, ActivitySnapshot, NetworkConnection, AppSettings, TodayStats, TeamMember } from "./types";
+import type { SessionState, ActivitySnapshot, NetworkConnection, AppSettings, TodayStats, TeamMember, PlaneProject, PlaneIssue, PlaneMember, PlaneState, TaskRecord } from "./types";
 
 export const session = writable<SessionState>({
   status: "idle",
@@ -21,16 +21,30 @@ export const settings = writable<AppSettings>({
   clock_in_time: "09:00",
   clock_out_time: "18:00",
   auto_clock_out_enabled: true,
+  pm_enabled: false,
+  pm_workspace_slug: "",
+  pm_base_url: "",
 });
 export const authToken = writable<string>("");
 export const userId = writable<string>("");
 export const isAdmin = writable<boolean>(false);
 export const userName = writable<string>("");
 export const errorMessage = writable<string>("");
-export const view = writable<"login" | "dashboard" | "settings" | "about" | "admin">("login");
+export const view = writable<"login" | "dashboard" | "settings" | "about" | "admin" | "apiKeys">("login");
 export const todayStats = writable<TodayStats | null>(null);
 export const teamStatus = writable<TeamMember[]>([]);
 export const elapsedSeconds = writable<number>(0);
+
+export const activeTask = writable<TaskRecord | null>(null);
+export const taskElapsedSeconds = writable<number>(0);
+export const planeProjects = writable<PlaneProject[]>([]);
+export const planeIssuesByProject = writable<Record<string, PlaneIssue[]>>({});
+export const planeStatesByProject = writable<Record<string, PlaneState[]>>({});
+export const planeMembers = writable<PlaneMember[]>([]);
+export const recentPlaneIssues = writable<PlaneIssue[]>([]);
+export const taskPanelView = writable<
+  "closed" | "menu" | "pickProject" | "pickIssue" | "custom" | "recent"
+>("closed");
 
 export const formattedElapsed = derived(elapsedSeconds, ($s) => {
   const h = Math.floor($s / 3600).toString().padStart(2, "0");

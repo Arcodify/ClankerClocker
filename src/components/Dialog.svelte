@@ -9,12 +9,16 @@
   export let showInput = false;
   export let inputPlaceholder = "";
   export let danger = false;
+  // Optional third action (e.g. end-task's "Stop" alongside "Complete").
+  // Hidden entirely when not provided, so no existing caller is affected.
+  export let secondaryLabel: string | null = null;
 
   // "cancel" fires only from the cancel button; Escape / overlay clicks fire
   // "dismiss" so callers whose cancel action has side effects (e.g. clocking
   // out) don't trigger it accidentally.
   const dispatch = createEventDispatcher<{
     confirm: { reason: string };
+    secondary: void;
     cancel: void;
     dismiss: void;
   }>();
@@ -22,6 +26,11 @@
 
   function confirm() {
     dispatch("confirm", { reason: reason.trim() });
+    reason = "";
+  }
+
+  function secondary() {
+    dispatch("secondary");
     reason = "";
   }
 
@@ -60,6 +69,9 @@
     {/if}
     <div class="dialog-actions">
       <button class="dlg-btn dlg-cancel" on:click={cancel}>{cancelLabel}</button>
+      {#if secondaryLabel}
+        <button class="dlg-btn dlg-secondary" on:click={secondary}>{secondaryLabel}</button>
+      {/if}
       <button class="dlg-btn dlg-confirm" class:danger on:click={confirm}>{confirmLabel}</button>
     </div>
   </div>
@@ -137,6 +149,14 @@
   .dlg-cancel:hover {
     color: #c0c0d0;
     background: #252532;
+  }
+  .dlg-secondary {
+    background: #1f2937;
+    color: #dbeafe;
+    border: 1px solid #273244;
+  }
+  .dlg-secondary:hover {
+    background: #273244;
   }
   .dlg-confirm {
     background: #22c55e;

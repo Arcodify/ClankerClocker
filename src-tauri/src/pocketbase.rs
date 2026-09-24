@@ -31,6 +31,14 @@ pub struct PbUser {
     pub clock_out_time: String,
     #[serde(default)]
     pub auto_clock_out_enabled: bool,
+    #[serde(default)]
+    pub pm_api: serde_json::Value,
+    /// PocketBase's built-in email-verification flag on the users auth
+    /// collection. Defaults to true when absent (e.g. a non-auth collection
+    /// record) so callers fail open rather than hiding a user we simply
+    /// couldn't read the flag for.
+    #[serde(default = "default_true")]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,8 +63,20 @@ pub struct PbUserRecord {
     pub clock_out_time: String,
     #[serde(default)]
     pub auto_clock_out_enabled: bool,
+    /// Per-user API keys for PM-tool integrations, keyed by provider (e.g.
+    /// "plane"). This is the real field on the `users` collection — a
+    /// separate `apis` field was patched by an earlier attempt at this same
+    /// UI but never actually existed in the schema, so it silently no-op'd.
     #[serde(default)]
-    pub apis: serde_json::Value,
+    pub pm_api: serde_json::Value,
+    /// PocketBase's built-in email-verification flag. Defaults to true when
+    /// missing so a read failure doesn't silently hide a real user.
+    #[serde(default = "default_true")]
+    pub verified: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone)]
@@ -98,7 +118,13 @@ impl PocketBase {
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Auth failed: {}", text));
         }
-        Ok(resp.json::<PbAuthResponse>().await?)
+
+        let raw_data = resp.text().await?;
+        let auth_data: PbAuthResponse = serde_json::from_str(&raw_data)?;
+
+        println!("{:?}", auth_data);
+
+        Ok(auth_data)
     }
 
     async fn post(&self, collection: &str, body: Value) -> Result<PbRecord> {
@@ -250,6 +276,95 @@ impl PocketBase {
         }))
     }
 
+    fn parse_task_record(item: &Value) -> Option<crate::session::TaskRecord> {
+        let id = item["id"].as_str()?.to_string();
+        let started_at = Self::parse_pb_datetime(item["started_at"].as_str().unwrap_or(""))?;
+        let ended_at = Self::parse_pb_datetime(item["ended_at"].as_str().unwrap_or(""));
+        Some(crate::session::TaskRecord {
+            id,
+            name: item["name"].as_str().unwrap_or("").to_string(),
+            session_id: item["session_id"].as_str().unwrap_or("").to_string(),
+            user_id: item["user_id"].as_str().unwrap_or("").to_string(),
+            started_at,
+            ended_at,
+            status: item["status"].as_str().unwrap_or("active").to_string(),
+            plane_project_id: item["plane_project_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+            plane_issue_id: item["plane_issue_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        })
+    }
+
+    pub async fn create_task(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        name: &str,
+        plane_project_id: Option<&str>,
+        plane_issue_id: Option<&str>,
+        started_at: &chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::session::TaskRecord> {
+        let rec = self
+            .post(
+                "tasks",
+                json!({
+                    "name": name,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "started_at": started_at.to_rfc3339(),
+                    "ended_at": "",
+                    "status": "active",
+                    "plane_project_id": plane_project_id.unwrap_or(""),
+                    "plane_issue_id": plane_issue_id.unwrap_or(""),
+                }),
+            )
+            .await?;
+        Ok(crate::session::TaskRecord {
+            id: rec.id,
+            name: name.to_string(),
+            session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
+            started_at: *started_at,
+            ended_at: None,
+            status: "active".to_string(),
+            plane_project_id: plane_project_id.map(String::from),
+            plane_issue_id: plane_issue_id.map(String::from),
+        })
+    }
+
+    pub async fn end_task(
+        &self,
+        task_id: &str,
+        ended_at: &chrono::DateTime<chrono::Utc>,
+        status: &str,
+    ) -> Result<()> {
+        self.patch(
+            "tasks",
+            task_id,
+            json!({ "ended_at": ended_at.to_rfc3339(), "status": status }),
+        )
+        .await
+    }
+
+    /// The task currently open (no ended_at) for this session, if any.
+    /// Mirrors `find_active_session`'s role: restores the running task's
+    /// timer after an app restart instead of silently dropping it.
+    pub async fn find_active_task(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::session::TaskRecord>> {
+        let filter = format!("session_id='{session_id}'&&ended_at=''");
+        let data = self
+            .get_list("tasks", &filter, "&sort=-started_at&perPage=1")
+            .await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        Ok(items.into_iter().next().and_then(|i| Self::parse_task_record(&i)))
+    }
+
     pub async fn get_company_settings(&self) -> Result<Value> {
         // Fetch the first record from the 'company_config' collection
         let data = self.get_list("company_config", "", "&perPage=1").await?;
@@ -259,6 +374,7 @@ impl PocketBase {
         if items.is_empty() {
             return Err(anyhow!("No company settings found"));
         }
+        // println!("{:?}", items);
         Ok(items[0].clone())
     }
 
@@ -276,18 +392,18 @@ impl PocketBase {
     }
 
     pub async fn add_user_apis(&self, id: &str, key: &str, value: &str) -> Result<()> {
-        let mut apis = self.get_user_record(id).await?.apis;
-        if !apis.is_object() {
-            apis = json!({});
+        let mut pm_api = self.get_user_record(id).await?.pm_api;
+        if !pm_api.is_object() {
+            pm_api = json!({});
         }
 
-        apis[key] = json!(value);
+        pm_api[key] = json!(value);
 
         self.patch(
             "users",
             id,
             json!({
-                "apis": apis
+                "pm_api": pm_api
             }),
         )
         .await
@@ -307,6 +423,24 @@ impl PocketBase {
                 "clock_in_time": clock_in,
                 "clock_out_time": clock_out,
                 "auto_clock_out_enabled": auto_out,
+            }),
+        )
+        .await
+    }
+
+    pub async fn update_pm_settings(
+        &self,
+        id: &str,
+        enable_pm: bool,
+        workspace_slug: &str,
+        base_url: &str,
+    ) -> Result<()> {
+        self.patch(
+            "company_config",
+            id,
+            json!({
+                "enable_pm": enable_pm,
+                "pm_config": { "workspace_slug": workspace_slug, "base_url": base_url },
             }),
         )
         .await
@@ -543,6 +677,30 @@ impl PocketBase {
         Ok(data)
     }
 
+    /// The current time as reported by the PocketBase server's `Date`
+    /// response header, rather than this machine's own OS clock.
+    ///
+    /// Totals for an in-progress (not-yet-clocked-out) session are computed
+    /// as `now - clock_in`, and every client previously supplied its own
+    /// local clock for "now". A client whose system clock has drifted (seen
+    /// on macOS when automatic time sync is off) then shows less elapsed
+    /// time than another machine looking at the very same open session —
+    /// e.g. an employee's Mac disagreeing with the admin panel. Routing
+    /// "now" through the server's clock instead gives every client the same
+    /// answer regardless of its own clock's accuracy.
+    async fn server_now(&self) -> chrono::DateTime<chrono::Utc> {
+        let url = format!("{}/api/health", self.base_url);
+        let Ok(resp) = self.client.get(&url).send().await else {
+            return chrono::Utc::now();
+        };
+        resp.headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now)
+    }
+
     fn parse_pb_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         if value.is_empty() {
             return None;
@@ -564,13 +722,27 @@ impl PocketBase {
 
     /// Get today's work stats for a given user.
     async fn get_today_breakdown_data(&self, user_id: &str) -> Result<TodayBreakdown> {
+        let now = self.server_now().await;
+        self.get_today_breakdown_data_at(user_id, now).await
+    }
+
+    /// Same as `get_today_breakdown_data`, but with the "now" reference
+    /// supplied by the caller instead of fetched here. `get_team_status`
+    /// looks up many users at once and shares a single `server_now()` call
+    /// across all of them rather than firing one redundant health-check
+    /// request per team member.
+    async fn get_today_breakdown_data_at(
+        &self,
+        user_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TodayBreakdown> {
         // "Today" follows Nepal time (the company's operating timezone), not UTC —
         // otherwise sessions started shortly after Nepal midnight (which is still
         // daytime UTC-wise) would be counted as "yesterday".
         use chrono::TimeZone;
         let nepal_offset =
             chrono::FixedOffset::east_opt(5 * 3600 + 45 * 60).expect("valid Nepal offset");
-        let now_nepal = chrono::Utc::now().with_timezone(&nepal_offset);
+        let now_nepal = now.with_timezone(&nepal_offset);
         let nepal_midnight = now_nepal.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let boundary_utc = nepal_offset
             .from_local_datetime(&nepal_midnight)
@@ -578,7 +750,7 @@ impl PocketBase {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let sessions = self
-            .get_sessions_in_range(&boundary_utc, &chrono::Utc::now(), Some(user_id))
+            .get_sessions_in_range(&boundary_utc, &now, &now, Some(user_id))
             .await?;
 
         let session_count = sessions.len() as u32;
@@ -616,7 +788,16 @@ impl PocketBase {
     }
 
     pub async fn get_today_stats(&self, user_id: &str) -> Result<TodayStats> {
-        let data = self.get_today_breakdown_data(user_id).await?;
+        let now = self.server_now().await;
+        self.get_today_stats_at(user_id, now).await
+    }
+
+    async fn get_today_stats_at(
+        &self,
+        user_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<TodayStats> {
+        let data = self.get_today_breakdown_data_at(user_id, now).await?;
 
         Ok(TodayStats {
             session_count: data.session_count,
@@ -666,6 +847,11 @@ impl PocketBase {
         let data = self.get_list("work_sessions", filter, "").await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
 
+        // Fetched once and shared across every team member below, instead of
+        // each member's lookup independently hitting the health-check
+        // endpoint for what would be the same instant anyway.
+        let now = self.server_now().await;
+
         let mut tasks = tokio::task::JoinSet::new();
         for (idx, item) in items.into_iter().enumerate() {
             let pb = self.clone();
@@ -685,19 +871,28 @@ impl PocketBase {
 
                 let user_fut = pb.get_user_record(&user_id);
                 let active_app_fut = pb.get_latest_active_app(&session_id);
-                let today_stats_fut = pb.get_today_stats(&user_id);
-                let (user_res, active_app_res, today_res) =
-                    tokio::join!(user_fut, active_app_fut, today_stats_fut);
+                let today_stats_fut = pb.get_today_stats_at(&user_id, now);
+                let active_task_fut = pb.find_active_task(&session_id);
+                let (user_res, active_app_res, today_res, active_task_res) =
+                    tokio::join!(user_fut, active_app_fut, today_stats_fut, active_task_fut);
 
                 let mut is_external_staff = false;
+                let mut verified = true;
                 if let Ok(user) = user_res {
                     is_external_staff = user.is_external_staff;
+                    verified = user.verified;
                     if !user.email.is_empty() {
                         user_email = user.email;
                     }
                     if !user.name.trim().is_empty() {
                         user_name = user.name.trim().to_string();
                     }
+                }
+
+                // An unverified email account must not show up anywhere in
+                // the app, including the admin's live team-status view.
+                if !verified {
+                    return (idx, None);
                 }
 
                 if user_name.is_empty() && !user_email.is_empty() {
@@ -717,10 +912,11 @@ impl PocketBase {
                 let (today_total_work_seconds, today_total_break_seconds) = today_res
                     .map(|s| (s.total_work_seconds, s.total_break_seconds))
                     .unwrap_or((0, 0));
+                let current_task_name = active_task_res.ok().flatten().map(|t| t.name);
 
                 (
                     idx,
-                    TeamMember {
+                    Some(TeamMember {
                         session_id,
                         user_id,
                         user_name,
@@ -736,7 +932,8 @@ impl PocketBase {
                         today_time_loss_seconds: 0,
                         is_external_staff,
                         in_call,
-                    },
+                        current_task_name,
+                    }),
                 )
             });
         }
@@ -744,7 +941,9 @@ impl PocketBase {
         let mut raw_members = Vec::new();
         while let Some(result) = tasks.join_next().await {
             let (_, member) = result.map_err(|e| anyhow!("team status task failed: {e}"))?;
-            raw_members.push(member);
+            if let Some(member) = member {
+                raw_members.push(member);
+            }
         }
 
         // A user can have multiple active sessions if a previous client crashed
@@ -852,7 +1051,7 @@ impl PocketBase {
             .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
-        let mut users: Vec<crate::session::UserInfo> = items
+        let candidates: Vec<crate::session::UserInfo> = items
             .iter()
             .filter_map(|item| {
                 let id = item["user_id"].as_str().unwrap_or("").to_string();
@@ -875,6 +1074,30 @@ impl PocketBase {
                 })
             })
             .collect();
+
+        // An unverified email account must not show up anywhere in the app.
+        // A user record we couldn't fetch is kept rather than hidden, since
+        // we can't positively confirm they're unverified.
+        let mut tasks = tokio::task::JoinSet::new();
+        for user in candidates {
+            let pb = self.clone();
+            tasks.spawn(async move {
+                let verified = pb
+                    .get_user_record(&user.id)
+                    .await
+                    .map(|r| r.verified)
+                    .unwrap_or(true);
+                (user, verified)
+            });
+        }
+        let mut users: Vec<crate::session::UserInfo> = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            if let Ok((user, verified)) = result {
+                if verified {
+                    users.push(user);
+                }
+            }
+        }
         users.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(users)
     }
@@ -883,8 +1106,10 @@ impl PocketBase {
         &self,
         from: &chrono::DateTime<chrono::Utc>,
         to: &chrono::DateTime<chrono::Utc>,
+        now: &chrono::DateTime<chrono::Utc>,
         user_id: Option<&str>,
     ) -> Result<Vec<crate::session::SessionRecord>> {
+        let now = *now;
         let mut filter = format!(
             "clock_in>='{}'&&clock_in<='{}'",
             from.format("%Y-%m-%d %H:%M:%S"),
@@ -946,13 +1171,9 @@ impl PocketBase {
                     }
                     if let Some(s) = Self::parse_pb_datetime(bs) {
                         let e = if be.is_empty() {
-                            session_end_by
-                                .get(&sid)
-                                .copied()
-                                .unwrap_or_else(chrono::Utc::now)
-                                .max(s)
+                            session_end_by.get(&sid).copied().unwrap_or(now).max(s)
                         } else {
-                            Self::parse_pb_datetime(be).unwrap_or_else(chrono::Utc::now)
+                            Self::parse_pb_datetime(be).unwrap_or(now)
                         };
                         *break_secs_by.entry(sid.clone()).or_insert(0) +=
                             (e - s).num_seconds().max(0);
@@ -962,7 +1183,6 @@ impl PocketBase {
             }
         }
 
-        let now = chrono::Utc::now();
         // Completed sessions get net_loss_seconds stamped by the server cron;
         // only sessions without a stamp (in-progress, or predating the
         // feature) need the expensive snapshot download.
@@ -1066,7 +1286,9 @@ impl PocketBase {
         to: &chrono::DateTime<chrono::Utc>,
         user_id: Option<&str>,
     ) -> Result<crate::session::NetworkReport> {
-        let sessions = self.get_sessions_in_range(from, to, user_id).await?;
+        let sessions = self
+            .get_sessions_in_range(from, to, &chrono::Utc::now(), user_id)
+            .await?;
         let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
 
         let mut all_records: Vec<crate::session::NetworkRecord> = Vec::new();
@@ -1147,7 +1369,9 @@ impl PocketBase {
         to: &chrono::DateTime<chrono::Utc>,
         user_id: &str,
     ) -> Result<crate::session::ActivityReport> {
-        let sessions = self.get_sessions_in_range(from, to, Some(user_id)).await?;
+        let sessions = self
+            .get_sessions_in_range(from, to, &chrono::Utc::now(), Some(user_id))
+            .await?;
         let session_ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
         let session_count = session_ids.len() as u32;
 

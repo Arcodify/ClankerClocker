@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import {
@@ -20,6 +21,8 @@
     view,
     elapsedSeconds,
     todayStats,
+    activeTask,
+    taskElapsedSeconds,
   } from "./lib/stores";
   import type {
     SessionState,
@@ -28,11 +31,13 @@
     AppNotification,
     TimeLossPrompt,
     LiveCounters,
+    TaskRecord,
   } from "./lib/types";
   import Login from "./components/Login.svelte";
   import Dashboard from "./components/Dashboard.svelte";
   import Settings from "./components/Settings.svelte";
   import About from "./components/About.svelte";
+  import ApiKeys from "./components/ApiKeys.svelte";
   import AdminView from "./components/AdminView.svelte";
   import Dialog from "./components/Dialog.svelte";
   import NotificationBanner from "./components/NotificationBanner.svelte";
@@ -257,6 +262,12 @@
       })
       .catch((err) => console.warn("Failed to get session state:", err));
 
+    // Restore a running task the same way — otherwise a restart mid-task
+    // silently drops its timer even though the session itself survives.
+    invoke<TaskRecord | null>("get_active_task")
+      .then((task) => activeTask.set(task))
+      .catch(() => {});
+
     // Real-time events from Rust daemon
     const unlistens: Array<Promise<any>> = [
       listen<SessionState>("session-update", (e) => {
@@ -264,6 +275,7 @@
         if (e.payload.status === "idle") {
           clearInterval(ticker);
           elapsedSeconds.set(0);
+          activeTask.set(null);
           stopRepeatingPush("clocked out");
         } else if (e.payload.status === "on_break" && e.payload.break_start) {
           // The timer shows the current break's running duration (not counted
@@ -342,6 +354,9 @@
         clock_in_time: saved.clock_in_time || s.clock_in_time,
         clock_out_time: saved.clock_out_time || s.clock_out_time,
         auto_clock_out_enabled: saved.auto_clock_out_enabled !== false,
+        pm_enabled: !!saved.pm_enabled,
+        pm_workspace_slug: saved.pm_workspace_slug || "",
+        pm_base_url: saved.pm_base_url || "",
       }));
 
       if (saved.pb_token && saved.token_saved_at) {
@@ -391,7 +406,21 @@
 
   function startTicker() {
     clearInterval(ticker);
-    ticker = setInterval(() => elapsedSeconds.update((s) => s + 1), 1000);
+    ticker = setInterval(() => {
+      elapsedSeconds.update((s) => s + 1);
+      if (get(activeTask)) taskElapsedSeconds.update((s) => s + 1);
+    }, 1000);
+  }
+
+  // A task's own timer is seeded fresh from started_at whenever the active
+  // task changes (started, switched, or ended) — same re-derive-from-
+  // timestamp approach as the session timer, so it's correct immediately
+  // rather than waiting for the next tick.
+  $: if ($activeTask) {
+    const start = new Date($activeTask.started_at).getTime();
+    taskElapsedSeconds.set(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+  } else {
+    taskElapsedSeconds.set(0);
   }
 
   function onLoginDone() {
@@ -431,6 +460,8 @@
     <AdminView on:back={() => view.set("dashboard")} />
   {:else if $view === "about"}
     <About on:back={() => view.set("settings")} />
+  {:else if $view === "apiKeys"}
+    <ApiKeys on:back={() => view.set("settings")} />
   {:else}
     <Settings on:back={() => view.set("dashboard")} />
   {/if}

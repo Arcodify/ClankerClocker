@@ -609,11 +609,20 @@
               <div class="ms"><span class="msv">{hhmm(m.today_total_break_seconds)}</span><span class="msl">Break</span></div>
               <div class="ms"><span class="msv">{m.break_count}</span><span class="msl">Breaks</span></div>
             </div>
-            {#if m.active_app}
-              <div class="mapp">
-                <span class="adot">●</span>{m.active_app}
-                {#if m.active_window_title && m.active_window_title !== m.active_app}
-                  <span class="mwin" title={m.active_window_title}>— {m.active_window_title}</span>
+            {#if m.current_task_name || m.active_app}
+              <div class="mextra">
+                {#if m.current_task_name}
+                  <div class="mtask">
+                    <span class="tdot">◆</span>{m.current_task_name}
+                  </div>
+                {/if}
+                {#if m.active_app}
+                  <div class="mapp">
+                    <span class="adot">●</span>{m.active_app}
+                    {#if m.active_window_title && m.active_window_title !== m.active_app}
+                      <span class="mwin" title={m.active_window_title}>— {m.active_window_title}</span>
+                    {/if}
+                  </div>
                 {/if}
               </div>
             {/if}
@@ -1192,7 +1201,10 @@
   .ms { display: flex; flex-direction: column; }
   .msv { font-size: 14px; font-weight: 700; color: #c0c0d8; font-variant-numeric: tabular-nums; }
   .msl { font-size: 9px; color: #4a4a62; text-transform: uppercase; letter-spacing: 0.4px; }
-  .mapp { font-size: 11px; color: #5a5a72; border-top: 1px solid #1a1a24; padding-top: 7px; display: flex; align-items: center; gap: 6px; }
+  .mextra { border-top: 1px solid #1a1a24; padding-top: 7px; display: flex; flex-direction: column; gap: 4px; }
+  .mtask { font-size: 11px; color: #93c5fd; display: flex; align-items: center; gap: 6px; }
+  .tdot { color: #6366f1; font-size: 9px; }
+  .mapp { font-size: 11px; color: #5a5a72; display: flex; align-items: center; gap: 6px; }
   .mwin { color: #44445a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .adot { color: #22c55e; font-size: 8px; }
   .badge-active { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: #22c55e; background: #0a1f0a; border: 1px solid #1a3a1a; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }

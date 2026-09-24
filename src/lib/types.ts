@@ -84,6 +84,7 @@ export interface TeamMember {
   today_time_loss_seconds: number;
   is_external_staff: boolean;
   in_call: boolean;
+  current_task_name: string | null;
 }
 
 export interface AppSettings {
@@ -94,6 +95,55 @@ export interface AppSettings {
   clock_in_time: string;
   clock_out_time: string;
   auto_clock_out_enabled: boolean;
+  pm_enabled: boolean;
+  pm_workspace_slug: string;
+  pm_base_url: string;
+}
+
+export interface PlaneProject {
+  id: string;
+  name: string;
+  identifier: string;
+  is_member: boolean;
+}
+
+export interface PlaneIssue {
+  id: string;
+  name: string;
+  project: string;
+  state: string;
+  created_at: string;
+  updated_at: string;
+  sequence_id: number | null;
+  assignees: string[];
+  created_by: string | null;
+  parent: string | null;
+}
+
+export interface PlaneMember {
+  id: string;
+  display_name: string;
+  email: string;
+}
+
+export interface PlaneState {
+  id: string;
+  name: string;
+  group: string;
+}
+
+export type TaskStatus = "active" | "completed" | "stopped";
+
+export interface TaskRecord {
+  id: string;
+  name: string;
+  session_id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  status: TaskStatus;
+  plane_project_id: string | null;
+  plane_issue_id: string | null;
 }
 
 export interface BreakConfig {

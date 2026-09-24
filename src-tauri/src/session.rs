@@ -209,6 +209,11 @@ pub struct TeamMember {
     /// Whether this member's mic was active as of the most recent snapshot.
     #[serde(default)]
     pub in_call: bool,
+    /// Name of the task this member is currently tracking time against, if
+    /// any (see `TaskRecord`) — lets the admin see what someone is working
+    /// on, not just that they're clocked in.
+    #[serde(default)]
+    pub current_task_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,7 +232,12 @@ pub struct AppConfig {
     pub clock_in_time: String,
     pub clock_out_time: String,
     pub auto_clock_out_enabled: bool,
-    pub token_saved_at: String, // RFC3339; empty means no saved token
+    pub token_saved_at: String,    // RFC3339; empty means no saved token
+    #[serde(default)]
+    pub pm_enabled: bool,
+    pub pm_api: serde_json::Value, // Arbitrary JSON for Plane API config (workspace slug, user
+    // token, etc.)
+    pub pm_config: serde_json::Value,
 }
 
 impl Default for AppConfig {
@@ -245,6 +255,9 @@ impl Default for AppConfig {
             clock_out_time: "18:00".into(),
             auto_clock_out_enabled: true,
             token_saved_at: String::new(),
+            pm_enabled: false,
+            pm_api: serde_json::json!({}),
+            pm_config: serde_json::json!({}),
         }
     }
 }
@@ -363,6 +376,26 @@ pub struct ActivityReport {
     pub top_windows: Vec<AppUsage>,
     pub session_count: u32,
     pub total_snapshot_count: u32,
+}
+
+/// A unit of tracked work within a clock-in session — either a Plane issue
+/// (existing or freshly created) or a purely local task. A session can carry
+/// several of these over its life (switching tasks without clocking out);
+/// each has its own start/end independent of the session's clock_in/out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    pub id: String,
+    pub name: String,
+    pub session_id: String,
+    pub user_id: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    /// "active" | "completed" | "stopped"
+    pub status: String,
+    #[serde(default)]
+    pub plane_project_id: Option<String>,
+    #[serde(default)]
+    pub plane_issue_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

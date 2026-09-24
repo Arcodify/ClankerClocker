@@ -11,6 +11,7 @@
   } from "../lib/stores";
   import type { BreakConfig, LiveCounters, TodayStats } from "../lib/types";
   import Dialog from "./Dialog.svelte";
+  import TaskPanel from "./TaskPanel.svelte";
 
   const dispatch = createEventDispatcher();
   let loading = false;
@@ -18,6 +19,8 @@
   let showEarlyOutDialog = false;
   let earlyOutDeficit = 0;
   let breakConfigs: BreakConfig[] = [];
+  let showActiveSessionDialog = false;
+  let activeSessionStartedAt = "";
 
   // Today's work and time loss are server-authoritative. The backend includes
   // the open session through "now", so the employee and admin use identical
@@ -59,6 +62,10 @@
   $: breakOvertime = breakRemaining !== null && breakRemaining < 0;
 
   $: deficitSeconds = $todayStats?.time_loss_seconds ?? 0;
+
+  $: activeSessionStartedLabel = activeSessionStartedAt
+    ? new Date(activeSessionStartedAt).toLocaleString()
+    : "another device";
 
   let liveCounters: LiveCounters | null = null;
   let unlisten: (() => void) | null = null;
@@ -144,12 +151,13 @@
     } catch (_) {}
   }
 
-  async function clockIn() {
+  async function clockIn(force = false) {
     loading = true;
     try {
       await invoke("clock_in", {
         userId: $userId || "offline",
         pbToken: $authToken || "",
+        force,
       });
       liveCounters = {
         keystrokes: 0,
@@ -160,12 +168,24 @@
         active_window: "",
         input_monitoring_active: true,
       };
+      showActiveSessionDialog = false;
       setTimeout(refreshTodayStats, 500);
     } catch (e) {
-      errorMessage.set(String(e));
+      const msg = String(e);
+      const marker = "SESSION_ALREADY_ACTIVE|";
+      if (msg.includes(marker)) {
+        activeSessionStartedAt = msg.slice(msg.indexOf(marker) + marker.length);
+        showActiveSessionDialog = true;
+      } else {
+        errorMessage.set(msg);
+      }
     } finally {
       loading = false;
     }
+  }
+
+  function onActiveSessionConfirm() {
+    clockIn(true);
   }
 
   async function clockOut() {
@@ -380,7 +400,7 @@
     <!-- Action buttons -->
     <div class="actions">
       {#if $session.status === "idle"}
-        <button class="btn btn-in" on:click={clockIn} disabled={loading}>
+        <button class="btn btn-in" on:click={() => clockIn()} disabled={loading}>
           {loading ? "…" : "Clock In"}
         </button>
       {:else if $session.status === "active"}
@@ -407,6 +427,10 @@
         <button class="btn btn-resume" on:click={endBreak}>End Break</button>
       {/if}
     </div>
+
+    {#if $session.status !== "idle"}
+      <TaskPanel />
+    {/if}
 
     <!-- Today's Summary -->
     {#if $todayStats}
@@ -556,6 +580,18 @@
   on:confirm={onEarlyOutConfirm}
   on:cancel={() => (showEarlyOutDialog = false)}
   on:dismiss={() => (showEarlyOutDialog = false)}
+/>
+
+<Dialog
+  open={showActiveSessionDialog}
+  title="Session already active"
+  body={`A session for your account is already active, started ${activeSessionStartedLabel}.\nEnd it and continue here?`}
+  confirmLabel="End & Continue Here"
+  cancelLabel="Cancel"
+  danger={true}
+  on:confirm={onActiveSessionConfirm}
+  on:cancel={() => (showActiveSessionDialog = false)}
+  on:dismiss={() => (showActiveSessionDialog = false)}
 />
 
 <style>

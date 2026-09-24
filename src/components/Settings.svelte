@@ -12,8 +12,12 @@
   let clockInTime = $settings.clock_in_time;
   let clockOutTime = $settings.clock_out_time;
   let autoClockOutEnabled = $settings.auto_clock_out_enabled;
+  let pmEnabled = $settings.pm_enabled;
+  let pmWorkspaceSlug = $settings.pm_workspace_slug;
+  let pmBaseUrl = $settings.pm_base_url;
   let saving = false;
   let savingSchedule = false;
+  let savingPm = false;
   let saveOk = false;
 
   async function save() {
@@ -78,6 +82,33 @@
       savingSchedule = false;
     }
   }
+
+  async function savePmSettings() {
+    savingPm = true;
+    try {
+      const result = await invoke<{
+        pm_enabled: boolean;
+        pm_config: { workspace_slug?: string; base_url?: string };
+      }>("save_pm_settings", {
+        enabled: pmEnabled,
+        workspaceSlug: pmWorkspaceSlug,
+        baseUrl: pmBaseUrl,
+      });
+      settings.update((s) => ({
+        ...s,
+        pm_enabled: result.pm_enabled,
+        pm_workspace_slug: result.pm_config?.workspace_slug ?? pmWorkspaceSlug,
+        pm_base_url: result.pm_config?.base_url ?? pmBaseUrl,
+      }));
+      saveOk = true;
+      setTimeout(() => { saveOk = false; }, 1000);
+    } catch (e) {
+      errorMessage.set("PM settings save failed: " + String(e));
+      setTimeout(() => errorMessage.set(""), 3000);
+    } finally {
+      savingPm = false;
+    }
+  }
 </script>
 
 <div class="settings">
@@ -127,7 +158,34 @@
           {#if savingSchedule}Updating policy…{:else}Update Company Policy{/if}
         </button>
       </div>
+
+      <div class="schedule-card">
+        <div class="schedule-title">Project Management Integration</div>
+        <label class="switch-row">
+          <span>Enable Plane integration</span>
+          <input bind:checked={pmEnabled} type="checkbox" />
+        </label>
+        <label>
+          <span>Workspace slug</span>
+          <input bind:value={pmWorkspaceSlug} placeholder="core" autocomplete="off" />
+        </label>
+        <label>
+          <span>Base URL</span>
+          <input bind:value={pmBaseUrl} placeholder="https://projects.example.com" type="url" />
+        </label>
+        <button class="btn-save btn-schedule" on:click={savePmSettings} disabled={savingPm}>
+          {#if savingPm}Updating…{:else}Update PM Settings{/if}
+        </button>
+      </div>
     {/if}
+
+    <div class="integration-card">
+      <div>
+        <div class="integration-title">Project Integrations</div>
+        <div class="integration-copy">Save API keys for Plane, Jira, Trello, ClickUp, or another provider.</div>
+      </div>
+      <button class="btn-integrations" on:click={() => view.set("apiKeys")}>Manage</button>
+    </div>
 
     {#if $authToken}
       <div class="auth-row">
@@ -256,6 +314,43 @@
     background: #1f2937;
   }
   .btn-schedule:hover:not(:disabled) { background: #273244; }
+
+  .integration-card {
+    margin-top: 4px;
+    padding: 14px;
+    border: 1px solid #1f2432;
+    border-radius: 10px;
+    background: #0a0c12;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .integration-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
+    color: #7c8aa6;
+    margin-bottom: 5px;
+  }
+  .integration-copy {
+    color: #6b7280;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .btn-integrations {
+    background: #1f2937;
+    border: 1px solid #273244;
+    color: #dbeafe;
+    border-radius: 7px;
+    cursor: pointer;
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 12px;
+  }
+  .btn-integrations:hover { background: #273244; }
 
   .auth-row { display: flex; align-items: center; justify-content: center; gap: 10px; }
   .auth-status { font-size: 12px; color: #22c55e; }

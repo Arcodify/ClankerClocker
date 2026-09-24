@@ -1,10 +1,11 @@
 use crate::config::DEFAULT_PB_URL;
 use crate::domain::time_loss::calculate as calculate_time_loss;
+use crate::pm::plane::{Plane, PlaneIssue, PlaneMember, PlaneProject, PlaneState};
 use crate::pocketbase::PocketBase;
 use crate::session::{
     ActivityCounters, ActivityReport, ActivitySnapshot, AppNotification, BreakConfig,
-    NetworkConnection, NetworkReport, SessionRecord, SessionState, SessionStatus, TeamMember,
-    TodayBreakdown, TodayStats, UserInfo, UserSummary,
+    NetworkConnection, NetworkReport, SessionRecord, SessionState, SessionStatus, TaskRecord,
+    TeamMember, TodayBreakdown, TodayStats, UserInfo, UserSummary,
 };
 use crate::AppState;
 use chrono::Utc;
@@ -253,6 +254,13 @@ pub async fn clock_out_internal(
     // closed automatically by close_stale_sessions() on the next clock-in.
     if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
         let pb = PocketBase::new(pb_url, pb_token);
+        // A task left running when the session ends would otherwise stay
+        // open forever (its session_id no longer matches any active
+        // session, so find_active_task on the next clock-in never finds it
+        // to clean up) — close it out as "stopped", same as breaks above.
+        if let Ok(Some(task)) = pb.find_active_task(&session_id).await {
+            pb.end_task(&task.id, &now, "stopped").await.ok();
+        }
         let extra_break_seconds = pb.close_open_breaks(&session_id, &now).await.unwrap_or(0);
         let total = total_break_seconds + extra_break_seconds;
         if let Err(e) = pb
@@ -287,6 +295,7 @@ pub async fn authenticate_pb(
         cfg.user_name = auth.record.name.clone();
         cfg.user_email = auth.record.email.clone();
         cfg.is_admin = auth.record.is_admin;
+        cfg.pm_api = auth.record.pm_api.clone();
         cfg.is_external_staff = auth.record.is_external_staff;
         cfg.token_saved_at = Utc::now().to_rfc3339();
         PocketBase::new(cfg.pb_url.clone(), cfg.pb_token.clone())
@@ -295,6 +304,10 @@ pub async fn authenticate_pb(
 
     if let Ok(settings) = pb.get_company_settings().await {
         let mut cfg = state.config.lock();
+        if settings["enable_pm"].as_bool().unwrap_or(false) {
+            cfg.pm_enabled = true;
+            cfg.pm_config = settings["pm_config"].clone();
+        }
         if let Some(ci) = settings["clock_in_time"].as_str() {
             cfg.clock_in_time = ci.to_string();
         }
@@ -317,7 +330,7 @@ pub async fn authenticate_pb(
         .save_config(&cfg_save)
         .map_err(|e| e.to_string())?;
 
-    // A session that was clocked in before we had credentials (Skip button,
+    // A session that wAas clocked in before we had credentials (Skip button,
     // or a stale saved token that just got cleared) only exists in memory —
     // sync it up now that we actually have a token.
     if let Some((old_id, new_id)) = sync_local_session_to_pb(
@@ -360,6 +373,9 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, Str
         "clock_out_time": cfg.clock_out_time,
         "auto_clock_out_enabled": cfg.auto_clock_out_enabled,
         "token_saved_at": cfg.token_saved_at,
+        "pm_enabled": cfg.pm_enabled,
+        "pm_workspace_slug": cfg.pm_config.get("workspace_slug").and_then(|v| v.as_str()).unwrap_or(""),
+        "pm_base_url": cfg.pm_config.get("base_url").and_then(|v| v.as_str()).unwrap_or(""),
         "default_pb_url": DEFAULT_PB_URL,
     }))
 }
@@ -489,6 +505,7 @@ pub async fn clock_in(
     state: State<'_, AppState>,
     user_id: String,
     pb_token: String,
+    force: Option<bool>,
 ) -> Result<(), String> {
     // Guard: reject if already active or on break (prevents double clock-in).
     {
@@ -497,6 +514,7 @@ pub async fn clock_in(
             return Err("Already clocked in".into());
         }
     }
+    let force = force.unwrap_or(false);
 
     let (pb_url, user_name, user_email) = {
         let cfg = state.config.lock();
@@ -535,7 +553,25 @@ pub async fn clock_in(
         format!("local-{}", uuid::Uuid::new_v4())
     } else {
         let pb = PocketBase::new(pb_url, pb_token);
-        // Close any stale active sessions for this user first (multi-machine protection)
+        // A session left open on another machine (or a prior crash on this
+        // one) must not be silently ended — ask the caller to confirm first.
+        // The frontend catches the "SESSION_ALREADY_ACTIVE|<clock_in>" error
+        // and re-invokes with force=true once the user agrees.
+        if !force {
+            if let Some(existing) = pb
+                .find_active_session(&user_id)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let started = existing
+                    .clock_in
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default();
+                return Err(format!("SESSION_ALREADY_ACTIVE|{started}"));
+            }
+        }
+        // Close the confirmed-stale active session(s) for this user now that
+        // the caller has agreed to end them (multi-machine protection).
         pb.close_stale_sessions(&user_id, &now).await.ok();
         let sid = pb
             .create_session(&user_id, &now, &display_name, &user_email)
@@ -1018,6 +1054,275 @@ pub async fn save_work_schedule(
 }
 
 #[tauri::command]
+pub async fn save_pm_settings(
+    state: State<'_, AppState>,
+    enabled: bool,
+    workspace_slug: String,
+    base_url: String,
+) -> Result<serde_json::Value, String> {
+    let (pb_url, pb_token, is_admin) = {
+        let mut cfg = state.config.lock();
+        if !cfg.is_admin {
+            return Err("Admin access required".into());
+        }
+        cfg.pm_enabled = enabled;
+        cfg.pm_config = json!({ "workspace_slug": workspace_slug, "base_url": base_url });
+        (cfg.pb_url.clone(), cfg.pb_token.clone(), cfg.is_admin)
+    };
+
+    if is_admin && !pb_url.is_empty() && !pb_token.is_empty() {
+        let pb = PocketBase::new(pb_url, pb_token);
+        if let Ok(settings) = pb.get_company_settings().await {
+            if let Some(id) = settings["id"].as_str() {
+                let _ = pb
+                    .update_pm_settings(id, enabled, &workspace_slug, &base_url)
+                    .await;
+            }
+        }
+    }
+
+    let cfg_clone = state.config.lock().clone();
+    state
+        .db
+        .lock()
+        .save_config(&cfg_clone)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "pm_enabled": cfg_clone.pm_enabled,
+        "pm_config": cfg_clone.pm_config,
+    }))
+}
+
+/// Builds a `Plane` client for the current user, resolving the workspace
+/// config from `company_config` (via `AppConfig.pm_config`/`pm_enabled`) and
+/// the personal API token from `users.pm_api.plane` (see `PbUserRecord`).
+/// Errors clearly instead of silently no-op-ing when either is missing.
+async fn plane_client_for(state: &State<'_, AppState>) -> Result<Plane, String> {
+    let (pb_url, pb_token, user_id, pm_config, pm_enabled) = {
+        let cfg = state.config.lock();
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            cfg.user_id.clone(),
+            cfg.pm_config.clone(),
+            cfg.pm_enabled,
+        )
+    };
+    if !pm_enabled {
+        return Err("Plane integration is not enabled".into());
+    }
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let pb = PocketBase::new(pb_url, pb_token);
+    let user = pb.get_user_record(&user_id).await.map_err(|e| e.to_string())?;
+    let token = user
+        .pm_api
+        .get("plane")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if token.is_empty() {
+        return Err("No Plane API key saved — add one in Settings".into());
+    }
+    let workspace_slug = pm_config
+        .get("workspace_slug")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let base_url = pm_config
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if workspace_slug.is_empty() || base_url.is_empty() {
+        return Err("Plane workspace is not configured — ask an admin to set it up in Settings".into());
+    }
+    Ok(Plane::new(base_url, workspace_slug, token))
+}
+
+#[tauri::command]
+pub async fn list_plane_projects(state: State<'_, AppState>) -> Result<Vec<PlaneProject>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_my_projects()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_project_issues(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PlaneIssue>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_project_issues(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_members(state: State<'_, AppState>) -> Result<Vec<PlaneMember>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_workspace_members()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_project_states(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PlaneState>, String> {
+    plane_client_for(&state)
+        .await?
+        .project_states(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_recent_plane_issues(state: State<'_, AppState>) -> Result<Vec<PlaneIssue>, String> {
+    let plane = plane_client_for(&state).await?;
+    let me = plane.current_user().await.map_err(|e| e.to_string())?;
+    plane
+        .list_recent_assigned_issues(&me.id, 20)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Starts tracking a task within the current session. Covers all three
+/// entry points: an existing Plane issue (`plane_project_id` + `plane_issue_id`
+/// both set), a new custom task in a Plane project (`plane_project_id` set,
+/// `plane_issue_id` empty — creates the issue first), or a purely local task
+/// (both empty). If a task is already running for this session, it's ended
+/// as "stopped" first — this is how switching tasks without clocking out
+/// works.
+#[tauri::command]
+pub async fn start_task(
+    state: State<'_, AppState>,
+    name: String,
+    plane_project_id: Option<String>,
+    plane_issue_id: Option<String>,
+) -> Result<TaskRecord, String> {
+    let (pb_url, pb_token, user_id, session_id, status) = {
+        let cfg = state.config.lock();
+        let sess = state.session.lock();
+        (
+            cfg.pb_url.clone(),
+            cfg.pb_token.clone(),
+            cfg.user_id.clone(),
+            sess.session_id.clone(),
+            sess.status.clone(),
+        )
+    };
+    if status == SessionStatus::Idle {
+        return Err("Clock in before starting a task".into());
+    }
+    let session_id = session_id.ok_or("No active session")?;
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let pb = PocketBase::new(pb_url, pb_token);
+    let now = Utc::now();
+
+    if let Some(existing) = pb
+        .find_active_task(&session_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        pb.end_task(&existing.id, &now, "stopped")
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut plane_issue_id = plane_issue_id.filter(|s| !s.is_empty());
+    let plane_project_id = plane_project_id.filter(|s| !s.is_empty());
+    if let Some(project_id) = &plane_project_id {
+        if plane_issue_id.is_none() {
+            let plane = plane_client_for(&state).await?;
+            let issue = plane
+                .create_issue(project_id, &name)
+                .await
+                .map_err(|e| e.to_string())?;
+            plane_issue_id = Some(issue.id);
+        }
+    }
+
+    pb.create_task(
+        &user_id,
+        &session_id,
+        &name,
+        plane_project_id.as_deref(),
+        plane_issue_id.as_deref(),
+        &now,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Ends a task. `complete` marks the linked Plane issue done too (if any) —
+/// a Plane-side failure is logged but doesn't fail the command, since the
+/// local time record is the source of truth for tracked time regardless of
+/// whether Plane is reachable right now.
+#[tauri::command]
+pub async fn end_task(
+    state: State<'_, AppState>,
+    task_id: String,
+    plane_project_id: Option<String>,
+    plane_issue_id: Option<String>,
+    complete: bool,
+) -> Result<(), String> {
+    let (pb_url, pb_token) = {
+        let cfg = state.config.lock();
+        (cfg.pb_url.clone(), cfg.pb_token.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let pb = PocketBase::new(pb_url, pb_token);
+    let now = Utc::now();
+    let status = if complete { "completed" } else { "stopped" };
+    pb.end_task(&task_id, &now, status)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if complete {
+        if let (Some(project_id), Some(issue_id)) = (plane_project_id, plane_issue_id) {
+            if let Ok(plane) = plane_client_for(&state).await {
+                if let Err(e) = plane.complete_issue(&project_id, &issue_id).await {
+                    log::warn!("failed to mark Plane issue {issue_id} complete: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The task currently running for this session, if any — restores the
+/// running timer after an app restart, mirroring `get_session_state`.
+#[tauri::command]
+pub async fn get_active_task(state: State<'_, AppState>) -> Result<Option<TaskRecord>, String> {
+    let (pb_url, pb_token, session_id) = {
+        let cfg = state.config.lock();
+        let sess = state.session.lock();
+        (cfg.pb_url.clone(), cfg.pb_token.clone(), sess.session_id.clone())
+    };
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Ok(None);
+    }
+    PocketBase::new(pb_url, pb_token)
+        .find_active_task(&session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let (pb_url, pb_token, user_id) = {
         let cfg = state.config.lock();
@@ -1197,7 +1502,7 @@ pub async fn get_sessions_report(
     }
     let (from, to) = nepal_range_from_dates(&from_date, &to_date);
     PocketBase::new(pb_url, pb_token)
-        .get_sessions_in_range(&from, &to, user_id.as_deref())
+        .get_sessions_in_range(&from, &to, &Utc::now(), user_id.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1224,7 +1529,7 @@ pub async fn get_time_summary(
     let (from, to) = nepal_range_from_dates(&from_date, &to_date);
     let pb = PocketBase::new(pb_url, pb_token);
     let sessions = pb
-        .get_sessions_in_range(&from, &to, user_id.as_deref())
+        .get_sessions_in_range(&from, &to, &Utc::now(), user_id.as_deref())
         .await
         .map_err(|e| e.to_string())?;
     // External staff have no required hours, so no time loss.

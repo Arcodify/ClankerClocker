@@ -46,13 +46,13 @@ pub struct AppState {
 pub fn run() {
     env_logger::init();
 
-    let planed = pm::plane::Plane::new("test".to_string(), "test".to_string(), "test".to_string());
-
-    tauri::async_runtime::spawn(async move {
-        planed.is_plane_user().await;
-    });
-
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let _ = app
+                .get_webview_window("main")
+                .expect("no main window")
+                .set_focus();
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -288,6 +288,15 @@ pub fn run() {
             commands::get_user_monthly_sessions,
             commands::get_user_today_breakdown,
             commands::save_work_schedule,
+            commands::save_pm_settings,
+            commands::list_plane_projects,
+            commands::list_plane_project_issues,
+            commands::list_plane_members,
+            commands::list_plane_project_states,
+            commands::list_recent_plane_issues,
+            commands::start_task,
+            commands::end_task,
+            commands::get_active_task,
             commands::refresh_auth_state,
             commands::clear_auth,
             commands::push_test_activity_snapshot,
@@ -371,6 +380,8 @@ impl Background {
                 self.network_tick = 0;
                 self.push_network_samples().await;
             }
+
+            // if pm enabled do things
         }
     }
 
