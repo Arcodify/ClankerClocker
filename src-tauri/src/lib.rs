@@ -608,7 +608,7 @@ impl Background {
             if cfg.auto_clock_out_enabled && !extended {
                 "your clockout time is here. you'll be auto clocked out shortly."
             } else {
-                "your clockout time is here"
+                "your scheduled clock-out time has passed — clock out whenever you're ready."
             },
         ) {
             self.scheduled_clockout_warned_at = Some(now);

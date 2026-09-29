@@ -54,6 +54,7 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             let idleTooLong = false;
             let secondsSinceLastPing = 0;
             let idleSeconds = 0;
+            let onCall = false;
 
             if (!onBreak) {
                 // Find the most recent activity snapshot for this session
@@ -85,10 +86,17 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
                         secondsSinceLastPing = (now - lastSeen) / 1000;
                     }
                     idleSeconds = latestSnapshot.getInt("idle_seconds") || 0;
+                    onCall = latestSnapshot.getBool("in_call");
                 }
 
                 offlineTooLong = secondsSinceLastPing >= OFFLINE_THRESHOLD_SECONDS;
-                idleTooLong = idleSeconds >= OFFLINE_THRESHOLD_SECONDS;
+                // Mirrors the client's own suppression (Background::tick_idle_clockout
+                // in src-tauri/src/lib.rs): mouse/keyboard idle time is expected while
+                // on a call, so it must not close the session out from under someone
+                // who's actively listening/talking. Only the most recent snapshot's
+                // in_call flag matters here — if the call ends and idle keeps climbing,
+                // the next minute's snapshot picks that up.
+                idleTooLong = idleSeconds >= OFFLINE_THRESHOLD_SECONDS && !onCall;
             }
 
             // Scheduled clock-out does not apply to external staff (they work
@@ -105,7 +113,7 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             console.log(
                 `[auto_clockout] eval ${sessionId} status=${session.getString("status")} onBreak=${onBreak} ` +
                 `offlineTooLong=${offlineTooLong}(${Math.round(secondsSinceLastPing)}s) ` +
-                `idleTooLong=${idleTooLong}(${idleSeconds}s) scheduledClose=${scheduledClose}`
+                `idleTooLong=${idleTooLong}(${idleSeconds}s onCall=${onCall}) scheduledClose=${scheduledClose}`
             );
 
             if (!offlineTooLong && !idleTooLong && !scheduledClose) {

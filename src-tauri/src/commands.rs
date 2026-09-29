@@ -113,7 +113,7 @@ pub async fn start_break_internal(
     notify(
         app,
         &format!("your {label} is starting"),
-        &format!("your {label} is starting"),
+        "the timer is paused — this time won't count toward your work hours.",
     );
     update_tray(app, "break");
     Ok(())
@@ -200,7 +200,7 @@ pub async fn end_break_internal(
     notify(
         app,
         &format!("your break {break_name} has ended"),
-        &format!("your break {break_name} has ended"),
+        "you're back — the timer is running again.",
     );
     update_tray(app, "active");
     Ok((break_count, total_break_seconds))
