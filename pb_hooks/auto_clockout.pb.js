@@ -2,7 +2,8 @@
 
 // Runs every minute. Closes any active/on_break session when:
 //   - the app has stopped reporting (offline) for 5+ minutes, or
-//   - the latest snapshot shows 5+ minutes of idle time, or
+//   - the latest snapshot shows 5+ minutes of idle time
+//     (both skipped while a break is within its allowed length), or
 //   - the company's scheduled clock-out time has passed (auto clock-out enabled).
 // This is the server-side safety net for when the desktop app isn't running
 // to perform its own client-side auto clock-out.
@@ -43,36 +44,35 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
 
             // Trust an open break record over the session's status field: the
             // client PATCHes status separately from creating the break, and a
-            // failed PATCH used to get people clocked out mid-break.
-            const onBreak =
-                session.getString("status") === "on_break" ||
-                utils.hasOpenBreak(sessionId);
+            // failed PATCH used to get people clocked out mid-break. (Status
+            // "on_break" with no open break means the break was ended and the
+            // PATCH back to "active" failed — treat it as active.)
+            const openBreak = utils.findOpenBreak(sessionId);
 
-            // While on a break, idle/offline is expected — only the scheduled
-            // clock-out time can end the session early.
+            // A break shields the session from the idle/offline checks only
+            // for its allowed length (break_configs duration) plus the same
+            // 5-minute grace. After that the normal checks apply, so someone
+            // who shut their laptop mid-break gets clocked out instead of
+            // sitting "on break" until their next clock-in. Someone back at
+            // the keyboard who just forgot to end the break isn't idle, so
+            // they're left alone.
+            let breakShielded = false;
+            if (openBreak) {
+                const allowedEnd = utils.breakAllowedEnd(openBreak);
+                breakShielded =
+                    !allowedEnd || (now - allowedEnd) / 1000 < OFFLINE_THRESHOLD_SECONDS;
+            }
+
             let offlineTooLong = false;
             let idleTooLong = false;
             let secondsSinceLastPing = 0;
             let idleSeconds = 0;
             let onCall = false;
 
-            if (!onBreak) {
-                // Find the most recent activity snapshot for this session
-                let latestSnapshot = null;
-                try {
-                    const snapshots = $app.findRecordsByFilter(
-                        "activity_snapshots",
-                        `session_id = '${sessionId}'`,
-                        "-timestamp",
-                        1,
-                        0
-                    );
-                    if (snapshots.length > 0) {
-                        latestSnapshot = snapshots[0];
-                    }
-                } catch (e) {
-                    // No snapshots found — treat as never active
-                }
+            if (!breakShielded) {
+                // The client keeps snapshotting during breaks, so the latest
+                // snapshot is meaningful whether or not a break is open.
+                const latestSnapshot = utils.latestSnapshot(sessionId);
 
                 if (!latestSnapshot) {
                     // Fall back to clock_in time if no snapshots at all
@@ -111,7 +111,8 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             }
 
             console.log(
-                `[auto_clockout] eval ${sessionId} status=${session.getString("status")} onBreak=${onBreak} ` +
+                `[auto_clockout] eval ${sessionId} status=${session.getString("status")} ` +
+                `openBreak=${openBreak ? openBreak.id : "none"} breakShielded=${breakShielded} ` +
                 `offlineTooLong=${offlineTooLong}(${Math.round(secondsSinceLastPing)}s) ` +
                 `idleTooLong=${idleTooLong}(${idleSeconds}s onCall=${onCall}) scheduledClose=${scheduledClose}`
             );
@@ -125,7 +126,12 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
                 : idleTooLong
                     ? `idle for ${Math.round(idleSeconds)}s`
                     : "past scheduled clock-out time";
-            utils.closeSession(session, now, `[auto_clockout] ${reason}`);
+            if (openBreak) {
+                const { end, breakEnd } = utils.breakCloseTimes(session, openBreak, now);
+                utils.closeSession(session, end, `[auto_clockout] ${reason} (on break)`, breakEnd);
+            } else {
+                utils.closeSession(session, now, `[auto_clockout] ${reason}`);
+            }
         } catch (e) {
             console.error(`[auto_clockout] error processing session ${sessionId}:`, e);
         }
@@ -170,7 +176,10 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
     // that lets the backfill below find unstamped sessions, at the cost of a
     // 1-second rounding error nobody will ever see.
     function stampNetLoss(session, logPrefix) {
-        const loss = Math.max(1, utils.computeNetLossSeconds(session.id));
+        const loss = Math.max(
+            1,
+            utils.computeNetLossSeconds(session.id, session.getString("clock_out"))
+        );
         if (session.getInt("net_loss_seconds") !== loss) {
             session.set("net_loss_seconds", loss);
             $app.save(session);

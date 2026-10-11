@@ -206,6 +206,26 @@ pub async fn end_break_internal(
     Ok((break_count, total_break_seconds))
 }
 
+/// Drops the in-memory session back to Idle without touching PocketBase.
+/// Used by clock-out and when the server has already closed the session.
+pub fn reset_local_session(
+    app: &tauri::AppHandle,
+    session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
+    counters: &std::sync::Arc<parking_lot::Mutex<ActivityCounters>>,
+    break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+) {
+    {
+        let mut sess = session.lock();
+        *sess = crate::session::SessionState::default();
+        let s = sess.clone();
+        drop(sess);
+        app.emit("session-update", s).ok();
+    }
+    *counters.lock() = ActivityCounters::default();
+    *break_id_state.lock() = None;
+    update_tray(app, "idle");
+}
+
 pub async fn clock_out_internal(
     app: &tauri::AppHandle,
     session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
@@ -237,18 +257,7 @@ pub async fn clock_out_internal(
 
     // Always reset local state immediately — the user must never be
     // stuck in "Clocked In" because of a network failure.
-    {
-        let mut sess = session.lock();
-        *sess = crate::session::SessionState::default();
-        let s = sess.clone();
-        drop(sess);
-        app.emit("session-update", s).ok();
-    }
-    {
-        let mut c = counters.lock();
-        *c = ActivityCounters::default();
-    }
-    update_tray(app, "idle");
+    reset_local_session(app, session, counters, break_id_state);
 
     // PB sync is best-effort. Any failure is logged; the stale session is
     // closed automatically by close_stale_sessions() on the next clock-in.

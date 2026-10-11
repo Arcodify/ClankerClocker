@@ -61,11 +61,18 @@ onRecordCreateRequest((e) => {
             );
             const now = new Date();
             for (const session of stale) {
-                utils.closeSession(
-                    session,
-                    now,
-                    "[session_guards] superseded by new clock-in"
-                );
+                const openBreak = utils.findOpenBreak(session.id);
+                if (openBreak) {
+                    const { end, breakEnd } = utils.breakCloseTimes(session, openBreak, now);
+                    utils.closeSession(
+                        session,
+                        end,
+                        "[session_guards] superseded by new clock-in (on break)",
+                        breakEnd
+                    );
+                } else {
+                    utils.closeSession(session, now, "[session_guards] superseded by new clock-in");
+                }
             }
         }
     } catch (err) {
@@ -74,3 +81,57 @@ onRecordCreateRequest((e) => {
 
     e.next();
 }, "work_sessions");
+
+// Hook C — a completed session is final for regular users. A client that
+// hasn't noticed the server closed its session (it still shows "On Break")
+// would otherwise reopen it on "End Break" (status -> active) or overwrite
+// the server's clock_out on clock-out, bringing the phantom hours back.
+// Admins can still edit. Server-side $app.save() calls don't go through
+// request hooks, so the cron and the guards above are unaffected.
+//
+// Also: when a client closes a session that still has an open break (the
+// clock-in path's close_stale_sessions does this, at "now", without ending
+// the break), re-close it with the same break-aware times the cron uses.
+onRecordUpdateRequest((e) => {
+    const utils = require(`${__hooks}/session_utils.js`);
+    const admin = utils.isAdminRequest(e);
+    const wasCompleted = e.record.original().getString("status") === "completed";
+    if (wasCompleted && !admin) {
+        throw new BadRequestError("This session was already closed.");
+    }
+    const closing = !wasCompleted && e.record.getString("status") === "completed";
+
+    e.next();
+
+    if (!closing || admin) {
+        return;
+    }
+    try {
+        const openBreak = utils.findOpenBreak(e.record.id);
+        if (!openBreak) {
+            return;
+        }
+        const session = $app.findRecordById("work_sessions", e.record.id);
+        const { end, breakEnd } = utils.breakCloseTimes(session, openBreak, new Date());
+        utils.closeSession(
+            session,
+            end,
+            "[session_guards] client closed session mid-break",
+            breakEnd
+        );
+    } catch (err) {
+        console.error("[session_guards] mid-break close fixup failed:", err);
+    }
+}, "work_sessions");
+
+// Hook D — breaks on a completed session are final for regular users too
+// (same stale-client reasoning as Hook C), and no new break can start on one.
+onRecordCreateRequest((e) => {
+    require(`${__hooks}/session_utils.js`).rejectBreakOnClosedSession(e);
+    e.next();
+}, "breaks");
+
+onRecordUpdateRequest((e) => {
+    require(`${__hooks}/session_utils.js`).rejectBreakOnClosedSession(e);
+    e.next();
+}, "breaks");

@@ -121,14 +121,75 @@ fn macos_mic_active() -> bool {
     .unwrap_or(false)
 }
 
-// ── Windows: CapabilityAccessManager consent store ───────────────────────────
-// Windows stamps LastUsedTimeStop to 0 for the duration an app holds the
-// microphone open and to a real FILETIME once it releases it — the same
-// per-user, no-admin-required bookkeeping that feeds Settings > Privacy's
-// "recently used" mic list and the taskbar mic-in-use icon.
+// ── Windows: WASAPI capture sessions ────────────────────────────────────────
+// Ask the audio engine directly: walk every active capture endpoint (mic,
+// headset, webcam mic, ...) and check whether any app has a capture session
+// in the Active state, i.e. is pulling audio from it right now. This is the
+// ground truth the consent store below is only a bookkeeping copy of, and
+// it keeps working on machines where Windows stops updating that store —
+// seen in the field: a live Discord call left no trace in the registry.
 
 #[cfg(target_os = "windows")]
 fn windows_mic_active() -> bool {
+    wasapi_capture_active().unwrap_or(false) || consent_store_mic_active()
+}
+
+#[cfg(target_os = "windows")]
+fn wasapi_capture_active() -> windows::core::Result<bool> {
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED,
+    };
+
+    // Runs on a tokio blocking-pool thread, which may or may not already be
+    // in a COM apartment. Only undo the init we actually performed.
+    let inited = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    // Inner fn so every COM pointer is released before CoUninitialize.
+    let result = any_capture_session_active();
+    if inited {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn any_capture_session_active() -> windows::core::Result<bool> {
+    use windows::Win32::Media::Audio::{
+        eCapture, AudioSessionStateActive, IAudioSessionManager2, IMMDeviceEnumerator,
+        MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let devices = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
+        for i in 0..devices.GetCount()? {
+            // One flaky device shouldn't hide a call on another.
+            let Ok(device) = devices.Item(i) else { continue };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
+                continue;
+            };
+            let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+            for j in 0..sessions.GetCount().unwrap_or(0) {
+                let Ok(session) = sessions.GetSession(j) else { continue };
+                if matches!(session.GetState(), Ok(s) if s == AudioSessionStateActive) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+// ── Windows fallback: CapabilityAccessManager consent store ──────────────────
+// Windows stamps LastUsedTimeStop to 0 for the duration an app holds the
+// microphone open and to a real FILETIME once it releases it — the same
+// per-user, no-admin-required bookkeeping that feeds Settings > Privacy's
+// "recently used" mic list and the taskbar mic-in-use icon. Kept as a
+// fallback in case WASAPI enumeration fails outright.
+
+#[cfg(target_os = "windows")]
+fn consent_store_mic_active() -> bool {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -142,7 +203,12 @@ fn windows_mic_active() -> bool {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+        // reg.exe prints in the console's OEM/ANSI codepage, not UTF-8. Any
+        // subkey with a non-ASCII byte (an app path like C:#Users#José#...)
+        // made strict from_utf8 reject the whole output and silently report
+        // "no call". The value names and 0x0 we match are pure ASCII, so
+        // lossy decoding keeps them intact.
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
 
     out.lines()

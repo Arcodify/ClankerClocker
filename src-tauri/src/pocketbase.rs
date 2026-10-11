@@ -450,6 +450,24 @@ impl PocketBase {
         self.get_record("users", user_id).await
     }
 
+    /// A session's server-side status and clock_out, or `None` if it isn't
+    /// visible. Goes through the list endpoint (same API rule
+    /// find_active_session relies on) rather than the view endpoint, whose
+    /// rule-denied response is an indistinguishable 404.
+    pub async fn get_session_status(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, Option<chrono::DateTime<chrono::Utc>>)>> {
+        let filter = format!("id='{session_id}'");
+        let data = self.get_list("work_sessions", &filter, "&perPage=1").await?;
+        Ok(data["items"].as_array().and_then(|items| items.first()).map(|item| {
+            (
+                item["status"].as_str().unwrap_or("").to_string(),
+                Self::parse_pb_datetime(item["clock_out"].as_str().unwrap_or("")),
+            )
+        }))
+    }
+
     /// Close any active/on_break sessions for a user (called before creating a new session).
     pub async fn close_stale_sessions(
         &self,

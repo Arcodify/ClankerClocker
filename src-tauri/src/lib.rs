@@ -202,6 +202,7 @@ pub fn run() {
                     snapshot_tick: 0,
                     network_tick: 0,
                     break_config_refresh_tick: 60,
+                    session_check_tick: 0,
                     scheduled_clockout_warned_at: None,
                 }
                 .run(),
@@ -333,6 +334,7 @@ struct Background {
     snapshot_tick: u32,
     network_tick: u32,
     break_config_refresh_tick: u32,
+    session_check_tick: u32,
     scheduled_clockout_warned_at: Option<DateTime<Utc>>,
 }
 
@@ -343,8 +345,10 @@ impl Background {
             self.snapshot_tick += 5;
             self.network_tick += 5;
             self.break_config_refresh_tick += 5;
+            self.session_check_tick += 5;
 
             self.tick_break_config_refresh().await;
+            self.tick_remote_close_check().await;
 
             let now = Utc::now();
             let now_npt = now.with_timezone(&nepal_offset());
@@ -463,6 +467,45 @@ impl Background {
         tauri::async_runtime::spawn_blocking(monitor::window::get_active_window)
             .await
             .unwrap_or_default()
+    }
+
+    /// Notices when the server has closed this session (break overran while
+    /// away, app offline, superseded by another clock-in) and drops back to
+    /// Idle. Without this the app keeps showing "Clocked In"/"On Break" and
+    /// its End Break / Clock Out calls are rejected by the server guards
+    /// (pb_hooks/session_guards.pb.js) that keep closed sessions closed.
+    async fn tick_remote_close_check(&mut self) {
+        if self.session_check_tick < 60 {
+            return;
+        }
+        self.session_check_tick = 0;
+        let Some(sid) = self.session.lock().session_id.clone() else {
+            return;
+        };
+        if sid.starts_with("local-") || self.status() == SessionStatus::Idle {
+            return;
+        }
+        let Some(pb) = self.pb() else { return };
+        // Only an explicit "completed" counts. Missing/unreadable records and
+        // network errors are ignored rather than risk kicking out someone who
+        // is genuinely clocked in.
+        let clock_out = match pb.get_session_status(&sid).await {
+            Ok(Some((status, clock_out))) if status == "completed" => clock_out,
+            _ => return,
+        };
+        // A local clock-out / clock-in may have raced the request.
+        if self.session.lock().session_id.as_deref() != Some(sid.as_str()) {
+            return;
+        }
+        commands::reset_local_session(&self.app, &self.session, &self.counters, &self.break_id);
+        let body = match clock_out {
+            Some(t) => format!(
+                "The server clocked you out at {} (break ran over or the app was offline). Clock in again to keep working.",
+                t.with_timezone(&nepal_offset()).format("%-I:%M %p")
+            ),
+            None => "The server clocked you out. Clock in again to keep working.".to_string(),
+        };
+        self.notify("idle_clockout", "you were clocked out", &body);
     }
 
     async fn tick_break_config_refresh(&mut self) {
