@@ -85,10 +85,17 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
                     if (lastSeen) {
                         secondsSinceLastPing = (now - lastSeen) / 1000;
                     }
-                    idleSeconds = latestSnapshot.getInt("idle_seconds") || 0;
+                    idleSeconds = utils.effectiveIdleSeconds(sessionId, latestSnapshot, now);
                     onCall = latestSnapshot.getBool("in_call");
                 }
 
+                // Ending a break proves the app was online then — a machine
+                // that slept through lunch has no snapshots during the break,
+                // and the gap must not read as "offline" right after it ends.
+                const breakEnd = utils.lastBreakEnd(sessionId);
+                if (breakEnd) {
+                    secondsSinceLastPing = Math.min(secondsSinceLastPing, (now - breakEnd) / 1000);
+                }
                 offlineTooLong = secondsSinceLastPing >= OFFLINE_THRESHOLD_SECONDS;
                 // Mirrors the client's own suppression (Background::tick_idle_clockout
                 // in src-tauri/src/lib.rs): mouse/keyboard idle time is expected while

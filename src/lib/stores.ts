@@ -1,5 +1,5 @@
 import { writable, derived } from "svelte/store";
-import type { SessionState, ActivitySnapshot, NetworkConnection, AppSettings, TodayStats, TeamMember, PlaneProject, PlaneIssue, PlaneMember, PlaneState, TaskRecord } from "./types";
+import type { SessionState, ActivitySnapshot, NetworkConnection, AppSettings, TodayStats, TeamMember, TaskRecord } from "./types";
 
 export const session = writable<SessionState>({
   status: "idle",
@@ -37,14 +37,6 @@ export const elapsedSeconds = writable<number>(0);
 
 export const activeTask = writable<TaskRecord | null>(null);
 export const taskElapsedSeconds = writable<number>(0);
-export const planeProjects = writable<PlaneProject[]>([]);
-export const planeIssuesByProject = writable<Record<string, PlaneIssue[]>>({});
-export const planeStatesByProject = writable<Record<string, PlaneState[]>>({});
-export const planeMembers = writable<PlaneMember[]>([]);
-export const recentPlaneIssues = writable<PlaneIssue[]>([]);
-export const taskPanelView = writable<
-  "closed" | "menu" | "pickProject" | "pickIssue" | "custom" | "recent"
->("closed");
 
 export const formattedElapsed = derived(elapsedSeconds, ($s) => {
   const h = Math.floor($s / 3600).toString().padStart(2, "0");

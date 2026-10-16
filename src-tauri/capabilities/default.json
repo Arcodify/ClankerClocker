@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/capabilities.schema.json",
   "identifier": "default",
   "description": "Default capabilities for ClankerClocker",
-  "windows": ["main"],
+  "windows": ["main", "tasks"],
   "permissions": [
     "core:default",
     "shell:allow-open",

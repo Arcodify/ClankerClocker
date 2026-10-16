@@ -126,6 +126,48 @@ function latestSnapshot(sessionId) {
     }
 }
 
+// End time of the session's most recently ended break, or null. Ending a
+// break is a request from the client, so it doubles as proof of life.
+function lastBreakEnd(sessionId) {
+    try {
+        const ended = $app.findRecordsByFilter(
+            "breaks",
+            `session_id = '${sessionId}' && end_time != ''`,
+            "-end_time",
+            1,
+            0
+        );
+        return ended.length > 0 ? parseDateTime(ended[0].getString("end_time")) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Idle seconds a snapshot really means for "is this person gone?" checks.
+// Ending a break is itself input, so idle accumulated before the latest
+// break end doesn't count — otherwise the last during-break snapshot (idle
+// = the whole break) closes the session seconds after "End Break", before
+// the client's next snapshot lands. Measured to `now` from the snapshot's
+// last-input time, so a stale or late-flushed snapshot can't overstate it.
+function effectiveIdleSeconds(sessionId, snapshot, now) {
+    if (!snapshot) {
+        return 0;
+    }
+    const ts = parseDateTime(snapshot.getString("timestamp"));
+    if (!ts) {
+        return 0;
+    }
+    let lastInput = new Date(ts.getTime() - (snapshot.getInt("idle_seconds") || 0) * 1000);
+    const breakEnd = lastBreakEnd(sessionId);
+    if (breakEnd && breakEnd > lastInput) {
+        lastInput = breakEnd;
+    }
+    // Idle can't exceed what the snapshot itself saw: anything after `ts` is
+    // the offline check's job, not the idle check's.
+    const idle = Math.floor((ts - lastInput) / 1000);
+    return idle > 0 ? idle : 0;
+}
+
 // Where to end a session that is being closed while a break is still open.
 // The break gets at most its allowed length; the session ends at the later
 // of that and the person's last real input (latest snapshot minus its idle
@@ -292,6 +334,8 @@ module.exports = {
     hasOpenBreak,
     breakAllowedEnd,
     latestSnapshot,
+    effectiveIdleSeconds,
+    lastBreakEnd,
     breakCloseTimes,
     closeOpenBreaks,
     closeSession,

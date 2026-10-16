@@ -118,6 +118,44 @@ export interface PlaneIssue {
   assignees: string[];
   created_by: string | null;
   parent: string | null;
+  priority: PlanePriority | null;
+  labels: string[];
+  start_date: string | null;
+  target_date: string | null;
+  description_stripped: string | null;
+}
+
+export type PlanePriority = "urgent" | "high" | "medium" | "low" | "none";
+
+export interface PlaneModule {
+  id: string;
+  name: string;
+  project: string;
+  status: string | null;
+  start_date: string | null;
+  target_date: string | null;
+}
+
+export interface PlaneCycle {
+  id: string;
+  name: string;
+  project: string;
+  start_date: string | null;
+  end_date: string | null;
+}
+
+export interface PlaneLabel {
+  id: string;
+  name: string;
+  color: string | null;
+}
+
+export interface PlaneUser {
+  id: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  display_name: string | null;
 }
 
 export interface PlaneMember {

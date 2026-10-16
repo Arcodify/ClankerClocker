@@ -1,6 +1,9 @@
 use crate::config::DEFAULT_PB_URL;
 use crate::domain::time_loss::calculate as calculate_time_loss;
-use crate::pm::plane::{Plane, PlaneIssue, PlaneMember, PlaneProject, PlaneState};
+use crate::pm::plane::{
+    NewIssue, Plane, PlaneCycle, PlaneIssue, PlaneLabel, PlaneMember, PlaneModule, PlaneProject,
+    PlaneState, PlaneUser,
+};
 use crate::pocketbase::PocketBase;
 use crate::session::{
     ActivityCounters, ActivityReport, ActivitySnapshot, AppNotification, BreakConfig,
@@ -269,6 +272,7 @@ pub async fn clock_out_internal(
         // to clean up) — close it out as "stopped", same as breaks above.
         if let Ok(Some(task)) = pb.find_active_task(&session_id).await {
             pb.end_task(&task.id, &now, "stopped").await.ok();
+            app.emit("task-changed", None::<TaskRecord>).ok();
         }
         let extra_break_seconds = pb.close_open_breaks(&session_id, &now).await.unwrap_or(0);
         let total = total_break_seconds + extra_break_seconds;
@@ -1202,6 +1206,168 @@ pub async fn list_recent_plane_issues(state: State<'_, AppState>) -> Result<Vec<
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_plane_me(state: State<'_, AppState>) -> Result<PlaneUser, String> {
+    plane_client_for(&state)
+        .await?
+        .current_user()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// All issues assigned to the caller across their projects — the Tasks
+/// window's default "My issues" view.
+#[tauri::command]
+pub async fn list_my_plane_issues(state: State<'_, AppState>) -> Result<Vec<PlaneIssue>, String> {
+    let plane = plane_client_for(&state).await?;
+    let me = plane.current_user().await.map_err(|e| e.to_string())?;
+    plane.list_my_issues(&me.id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_modules(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PlaneModule>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_modules(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_module_issues(
+    state: State<'_, AppState>,
+    project_id: String,
+    module_id: String,
+) -> Result<Vec<PlaneIssue>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_module_issues(&project_id, &module_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_cycles(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PlaneCycle>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_cycles(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_cycle_issues(
+    state: State<'_, AppState>,
+    project_id: String,
+    cycle_id: String,
+) -> Result<Vec<PlaneIssue>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_cycle_issues(&project_id, &cycle_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_plane_labels(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<PlaneLabel>, String> {
+    plane_client_for(&state)
+        .await?
+        .list_labels(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn create_plane_issue(
+    state: State<'_, AppState>,
+    project_id: String,
+    issue: NewIssue,
+) -> Result<PlaneIssue, String> {
+    plane_client_for(&state)
+        .await?
+        .create_issue_full(&project_id, issue)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Partial issue update — `patch` holds only the changed fields.
+#[tauri::command]
+pub async fn update_plane_issue(
+    state: State<'_, AppState>,
+    project_id: String,
+    issue_id: String,
+    patch: serde_json::Value,
+) -> Result<(), String> {
+    plane_client_for(&state)
+        .await?
+        .update_issue(&project_id, &issue_id, patch)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Seconds tracked per Plane issue id, all-time, for the current user. An
+/// active task counts up to now.
+#[tauri::command]
+pub async fn get_task_totals(state: State<'_, AppState>) -> Result<HashMap<String, i64>, String> {
+    let (pb_url, pb_token, user_id) = {
+        let cfg = state.config.lock();
+        (cfg.pb_url.clone(), cfg.pb_token.clone(), cfg.user_id.clone())
+    };
+    if pb_url.is_empty() || pb_token.is_empty() {
+        return Err("Not connected to PocketBase".into());
+    }
+    let tasks = PocketBase::new(pb_url, pb_token)
+        .list_user_plane_tasks(&user_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let now = Utc::now();
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    for t in tasks {
+        let Some(issue_id) = t.plane_issue_id else { continue };
+        let secs = (t.ended_at.unwrap_or(now) - t.started_at).num_seconds().max(0);
+        *totals.entry(issue_id).or_default() += secs;
+    }
+    Ok(totals)
+}
+
+/// Opens (or focuses) the standalone Tasks window. The main window is a
+/// fixed 380px tray popover — too narrow for browsing projects/modules —
+/// so task management lives in its own resizable window.
+pub fn show_tasks_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("tasks") {
+        win.unminimize().ok();
+        win.show().ok();
+        win.set_focus().ok();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "tasks",
+        tauri::WebviewUrl::App("index.html?window=tasks".into()),
+    )
+    .title("Tasks — ClankerClocker")
+    .inner_size(1000.0, 660.0)
+    .min_inner_size(720.0, 480.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_tasks_window(app: tauri::AppHandle) -> Result<(), String> {
+    show_tasks_window(&app)
+}
+
 /// Starts tracking a task within the current session. Covers all three
 /// entry points: an existing Plane issue (`plane_project_id` + `plane_issue_id`
 /// both set), a new custom task in a Plane project (`plane_project_id` set,
@@ -1211,6 +1377,7 @@ pub async fn list_recent_plane_issues(state: State<'_, AppState>) -> Result<Vec<
 /// works.
 #[tauri::command]
 pub async fn start_task(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     name: String,
     plane_project_id: Option<String>,
@@ -1260,16 +1427,21 @@ pub async fn start_task(
         }
     }
 
-    pb.create_task(
-        &user_id,
-        &session_id,
-        &name,
-        plane_project_id.as_deref(),
-        plane_issue_id.as_deref(),
-        &now,
-    )
-    .await
-    .map_err(|e| e.to_string())
+    let task = pb
+        .create_task(
+            &user_id,
+            &session_id,
+            &name,
+            plane_project_id.as_deref(),
+            plane_issue_id.as_deref(),
+            &now,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    // Each window keeps its own copy of the active task — broadcast so the
+    // dashboard bar and the Tasks window never disagree.
+    app.emit("task-changed", Some(&task)).ok();
+    Ok(task)
 }
 
 /// Ends a task. `complete` marks the linked Plane issue done too (if any) —
@@ -1278,6 +1450,7 @@ pub async fn start_task(
 /// whether Plane is reachable right now.
 #[tauri::command]
 pub async fn end_task(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     task_id: String,
     plane_project_id: Option<String>,
@@ -1297,6 +1470,7 @@ pub async fn end_task(
     pb.end_task(&task_id, &now, status)
         .await
         .map_err(|e| e.to_string())?;
+    app.emit("task-changed", None::<TaskRecord>).ok();
 
     if complete {
         if let (Some(project_id), Some(issue_id)) = (plane_project_id, plane_issue_id) {

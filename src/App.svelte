@@ -270,6 +270,9 @@
 
     // Real-time events from Rust daemon
     const unlistens: Array<Promise<any>> = [
+      // start_task/end_task broadcast this so the dashboard stays in sync
+      // with tasks started or ended from the Tasks window.
+      listen<TaskRecord | null>("task-changed", (e) => activeTask.set(e.payload)),
       listen<SessionState>("session-update", (e) => {
         session.set(e.payload);
         if (e.payload.status === "idle") {

@@ -83,8 +83,9 @@ pub fn run() {
 
             // System tray
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let tasks = MenuItem::with_id(app, "tasks", "Tasks", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &tasks, &quit])?;
 
             // Gray = idle; commands::update_tray swaps in the green/yellow
             // variants on clock-in and break transitions.
@@ -100,6 +101,11 @@ pub fn run() {
                         if let Some(win) = app.get_webview_window("main") {
                             win.show().ok();
                             win.set_focus().ok();
+                        }
+                    }
+                    "tasks" => {
+                        if let Err(e) = commands::show_tasks_window(app) {
+                            log::warn!("failed to open Tasks window: {e}");
                         }
                     }
                     "quit" => {
@@ -295,6 +301,17 @@ pub fn run() {
             commands::list_plane_members,
             commands::list_plane_project_states,
             commands::list_recent_plane_issues,
+            commands::list_my_plane_issues,
+            commands::get_plane_me,
+            commands::list_plane_modules,
+            commands::list_plane_module_issues,
+            commands::list_plane_cycles,
+            commands::list_plane_cycle_issues,
+            commands::list_plane_labels,
+            commands::create_plane_issue,
+            commands::update_plane_issue,
+            commands::get_task_totals,
+            commands::open_tasks_window,
             commands::start_task,
             commands::end_task,
             commands::get_active_task,

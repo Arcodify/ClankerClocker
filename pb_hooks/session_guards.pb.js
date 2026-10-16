@@ -19,10 +19,19 @@ onRecordCreateRequest((e) => {
             return;
         }
 
+        // Same suppression as the client and the cron: no mouse/keyboard
+        // input is expected while on a call.
+        if (e.record.getBool("in_call")) {
+            return;
+        }
+
         const utils = require(`${__hooks}/session_utils.js`);
         const sessionId = e.record.getString("session_id");
         if (!sessionId) {
             return;
+        }
+        if (utils.effectiveIdleSeconds(sessionId, e.record, new Date()) < IDLE_THRESHOLD_SECONDS) {
+            return; // idle predates the last break end
         }
 
         const session = $app.findRecordById("work_sessions", sessionId);

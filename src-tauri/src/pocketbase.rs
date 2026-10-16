@@ -365,6 +365,18 @@ impl PocketBase {
         Ok(items.into_iter().next().and_then(|i| Self::parse_task_record(&i)))
     }
 
+    /// Every Plane-linked task this user has tracked, for per-issue time
+    /// totals in the Tasks window. Local-only tasks are skipped.
+    pub async fn list_user_plane_tasks(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::session::TaskRecord>> {
+        let filter = format!("user_id='{user_id}'&&plane_issue_id!=''");
+        let data = self.get_list("tasks", &filter, "").await?;
+        let items = data["items"].as_array().cloned().unwrap_or_default();
+        Ok(items.iter().filter_map(Self::parse_task_record).collect())
+    }
+
     pub async fn get_company_settings(&self) -> Result<Value> {
         // Fetch the first record from the 'company_config' collection
         let data = self.get_list("company_config", "", "&perPage=1").await?;
