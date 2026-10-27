@@ -164,6 +164,15 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                 c.mouse_clicks += 1;
                                 active_flag_ref.store(true, Ordering::Relaxed);
                             }
+                            // Scrolling is real user input too. Precision
+                            // touchpads commonly emit wheel events for
+                            // two-finger scrolling without moving the cursor.
+                            EventType::Wheel { delta_x, delta_y }
+                                if delta_x != 0 || delta_y != 0 =>
+                            {
+                                c.last_activity = Some(std::time::Instant::now());
+                                active_flag_ref.store(true, Ordering::Relaxed);
+                            }
                             EventType::MouseMove { x, y } => {
                                 if x.is_finite() && y.is_finite() {
                                     let mut moved = false;

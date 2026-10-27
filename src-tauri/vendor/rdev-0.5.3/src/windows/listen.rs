@@ -50,7 +50,11 @@ where
         set_key_hook(raw_callback)?;
         set_mouse_hook(raw_callback)?;
 
-        GetMessageA(null_mut(), null_mut(), 0, 0);
+        // A Windows hook is delivered through this thread's message queue.
+        // GetMessage returns after *each* message; calling it only once made
+        // the listener thread exit after the first keyboard/mouse event.
+        // Keep pumping until WM_QUIT (0) or an error (-1).
+        while GetMessageA(null_mut(), null_mut(), 0, 0) > 0 {}
     }
     Ok(())
 }

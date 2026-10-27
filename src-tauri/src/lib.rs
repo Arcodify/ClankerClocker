@@ -2,6 +2,7 @@ mod audio;
 mod commands;
 pub mod config;
 mod db;
+mod diagnostics;
 mod domain;
 mod monitor;
 mod pm;
@@ -41,10 +42,11 @@ pub struct AppState {
     pub scheduled_notification_history: Arc<Mutex<HashSet<String>>>,
     pub pending_auto_breaks: Arc<Mutex<HashSet<String>>>,
     pub audio: Arc<audio::AudioPlayer>,
+    pub diagnostics: Arc<diagnostics::Diagnostics>,
 }
 
 pub fn run() {
-    env_logger::init();
+    diagnostics::init_logger();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
@@ -63,6 +65,9 @@ pub fn run() {
 
             let db = LocalDb::open(db_path.to_str().unwrap()).expect("failed to open local db");
             let config = db.load_config().unwrap_or_default();
+            // Diagnostics is intentionally per-process and always starts OFF.
+            // The user must opt in again after every app restart.
+            let diagnostics = Arc::new(diagnostics::Diagnostics::new(&data_dir));
 
             let db = Arc::new(Mutex::new(db));
             let config = Arc::new(Mutex::new(config));
@@ -178,6 +183,7 @@ pub fn run() {
                 scheduled_notification_history: scheduled_notification_history.clone(),
                 pending_auto_breaks: pending_auto_breaks.clone(),
                 audio: Arc::new(audio::AudioPlayer::new()),
+                diagnostics: diagnostics.clone(),
             });
 
             // Start input monitor thread (rdev blocks its OS thread)
@@ -203,6 +209,7 @@ pub fn run() {
                     input_monitoring: input_monitoring.clone(),
                     active_window: active_window.clone(),
                     debug: DebugOverrides::load(),
+                    diagnostics: diagnostics.clone(),
                     net_seen: HashSet::new(),
                     dns_cache: HashMap::new(),
                     snapshot_tick: 0,
@@ -296,6 +303,9 @@ pub fn run() {
             commands::get_user_today_breakdown,
             commands::save_work_schedule,
             commands::save_pm_settings,
+            commands::set_diagnostics_enabled,
+            commands::export_diagnostic_log,
+            commands::record_frontend_diagnostic,
             commands::list_plane_projects,
             commands::list_plane_project_issues,
             commands::list_plane_members,
@@ -344,6 +354,7 @@ struct Background {
     input_monitoring: Arc<AtomicBool>,
     active_window: Arc<Mutex<(String, String)>>,
     debug: DebugOverrides,
+    diagnostics: Arc<diagnostics::Diagnostics>,
 
     // Loop-local scratch state
     net_seen: HashSet<String>,
@@ -373,9 +384,39 @@ impl Background {
             self.debug.apply_to_config(&mut config_snapshot);
 
             let (active_app, active_window) = self.read_active_window().await;
-            let in_call = tauri::async_runtime::spawn_blocking(monitor::call::mic_active)
+            let mic_active = tauri::async_runtime::spawn_blocking(monitor::call::mic_active)
                 .await
                 .unwrap_or(false);
+            // Mic capture is the strongest signal, but browsers and meeting
+            // clients can release the device while muted. Keep an actively
+            // focused, recognisable meeting window protected as well.
+            let meeting_window = is_conference_window(&active_app, &active_window);
+            let in_call = mic_active || meeting_window;
+
+            if self.diagnostics.enabled() {
+                let status = match self.status() {
+                    SessionStatus::Idle => "idle",
+                    SessionStatus::Active => "active",
+                    SessionStatus::OnBreak => "on_break",
+                };
+                let counters = self.counters.lock();
+                self.diagnostics.record(
+                    "monitor_tick",
+                    serde_json::json!({
+                        "session_status": status,
+                        "idle_seconds": counters.idle_seconds(),
+                        "keystrokes_since_snapshot": counters.keystrokes,
+                        "mouse_clicks_since_snapshot": counters.mouse_clicks,
+                        "mouse_distance_since_snapshot": counters.mouse_distance_px.round(),
+                        "input_monitoring_active": self.input_monitoring.load(Ordering::Relaxed),
+                        "mic_active": mic_active,
+                        "meeting_window_match": meeting_window,
+                        "in_call": in_call,
+                        "active_app": active_app,
+                        "active_window": active_window,
+                    }),
+                );
+            }
 
             if self.status() == SessionStatus::Idle {
                 // Clear per-session state so the next session starts fresh.
@@ -514,6 +555,12 @@ impl Background {
         if self.session.lock().session_id.as_deref() != Some(sid.as_str()) {
             return;
         }
+        self.diagnostics.record(
+            "server_closed_session",
+            serde_json::json!({
+                "server_clock_out": clock_out.map(|t| t.to_rfc3339()),
+            }),
+        );
         commands::reset_local_session(&self.app, &self.session, &self.counters, &self.break_id);
         let body = match clock_out {
             Some(t) => format!(
@@ -568,21 +615,36 @@ impl Background {
         if idle_seconds >= self.debug.idle_warning_seconds
             && idle_seconds < self.debug.idle_clockout_seconds
         {
-            self.notify_once(
+            if self.notify_once(
                 format!("{sid}:idle_clockout_warning"),
                 "idle_clockout_warning",
                 "clock-out warning",
                 "You are about to be clocked out for inactivity. Move your mouse or press any key to stay clocked in.",
-            );
+            ) {
+                self.diagnostics.record(
+                    "idle_warning",
+                    serde_json::json!({ "idle_seconds": idle_seconds, "in_call": in_call }),
+                );
+            }
         }
 
         if idle_seconds >= self.debug.idle_clockout_seconds {
-            self.notify_once(
+            let first_notification = self.notify_once(
                 format!("{sid}:idle_clockout"),
                 "idle_clockout",
                 "auto clocked out for idle",
                 "You were clocked out automatically after 5 minutes of inactivity.",
             );
+            if first_notification {
+                self.diagnostics.record(
+                    "idle_auto_clockout",
+                    serde_json::json!({
+                        "idle_seconds": idle_seconds,
+                        "input_monitoring_active": self.input_monitoring.load(Ordering::Relaxed),
+                        "in_call": in_call,
+                    }),
+                );
+            }
             let _ = commands::clock_out_internal(
                 &self.app,
                 &self.session,
@@ -974,6 +1036,67 @@ impl Background {
                 self.db.lock().queue_network(&sid, &new_conns).ok();
             }
         }
+    }
+}
+
+/// Conservative fallback for calls where the microphone is muted/released.
+/// Requiring a meeting-specific title avoids treating ordinary Slack/Teams
+/// chat as a call merely because that application has focus.
+fn is_conference_window(app: &str, window: &str) -> bool {
+    let app = app.to_lowercase();
+    let window = window.to_lowercase();
+
+    const MEETING_TITLES: &[&str] = &[
+        "google meet",
+        "meet.google.com",
+        "zoom meeting",
+        "zoom webinar",
+        "microsoft teams meeting",
+        "teams meeting",
+        "slack huddle",
+        "webex meeting",
+        "webex webinar",
+        "jitsi meet",
+        "whereby.com",
+    ];
+    if MEETING_TITLES.iter().any(|needle| window.contains(needle)) {
+        return true;
+    }
+
+    // Native clients often use a generic in-call title. Only accept those
+    // phrases when the owning process is itself a known call client.
+    const CALL_APPS: &[&str] = &["zoom", "teams", "slack", "webex", "discord", "skype"];
+    const CALL_TITLES: &[&str] = &[
+        "in a call",
+        "call in progress",
+        "meeting in progress",
+        "voice call",
+        "video call",
+        "huddle",
+    ];
+    CALL_APPS.iter().any(|needle| app.contains(needle))
+        && CALL_TITLES.iter().any(|needle| window.contains(needle))
+}
+
+#[cfg(test)]
+mod call_window_tests {
+    use super::is_conference_window;
+
+    #[test]
+    fn detects_browser_and_native_meetings() {
+        assert!(is_conference_window(
+            "chrome.exe",
+            "Daily sync - Google Meet"
+        ));
+        assert!(is_conference_window("Teams.exe", "Call in progress"));
+        assert!(is_conference_window("slack", "Design huddle"));
+    }
+
+    #[test]
+    fn does_not_treat_normal_chat_as_a_call() {
+        assert!(!is_conference_window("Teams.exe", "General | Arcodify"));
+        assert!(!is_conference_window("slack", "Sarah (Direct message)"));
+        assert!(!is_conference_window("chrome.exe", "Google Calendar"));
     }
 }
 

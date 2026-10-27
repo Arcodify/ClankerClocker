@@ -15,6 +15,10 @@
   let pmEnabled = $settings.pm_enabled;
   let pmWorkspaceSlug = $settings.pm_workspace_slug;
   let pmBaseUrl = $settings.pm_base_url;
+  // This store value is runtime-only; the native side always starts disabled.
+  let diagnosticsEnabled = $settings.diagnostics_enabled;
+  let diagnosticsBusy = false;
+  let diagnosticsMessage = "";
   let saving = false;
   let savingSchedule = false;
   let savingPm = false;
@@ -109,6 +113,38 @@
       savingPm = false;
     }
   }
+
+  async function toggleDiagnostics() {
+    diagnosticsBusy = true;
+    diagnosticsMessage = "";
+    try {
+      diagnosticsEnabled = await invoke<boolean>("set_diagnostics_enabled", {
+        enabled: diagnosticsEnabled,
+      });
+      settings.update((s) => ({ ...s, diagnostics_enabled: diagnosticsEnabled }));
+      diagnosticsMessage = diagnosticsEnabled
+        ? "Diagnostics started. Reproduce the problem, then save the log."
+        : "Diagnostics stopped.";
+    } catch (e) {
+      diagnosticsEnabled = !diagnosticsEnabled;
+      diagnosticsMessage = "Could not update diagnostics: " + String(e);
+    } finally {
+      diagnosticsBusy = false;
+    }
+  }
+
+  async function exportDiagnostics() {
+    diagnosticsBusy = true;
+    diagnosticsMessage = "";
+    try {
+      const path = await invoke<string>("export_diagnostic_log");
+      diagnosticsMessage = `Saved to ${path}`;
+    } catch (e) {
+      diagnosticsMessage = String(e);
+    } finally {
+      diagnosticsBusy = false;
+    }
+  }
 </script>
 
 <div class="settings">
@@ -185,6 +221,36 @@
         <div class="integration-copy">Save API keys for Plane, Jira, Trello, ClickUp, or another provider.</div>
       </div>
       <button class="btn-integrations" on:click={() => view.set("apiKeys")}>Manage</button>
+    </div>
+
+    <div class="diagnostics-card">
+      <div class="diagnostics-heading">
+        <div>
+          <div class="integration-title">Diagnostics</div>
+          <div class="integration-copy">
+            Start a fresh, detailed app log for this run, including input counts, app warnings,
+            idle decisions, call detection, active app/window, sync, and clock-out events. It
+            automatically turns off when the app restarts. Typed text, passwords, tokens, and
+            network contents are never recorded.
+          </div>
+        </div>
+        <label class="diagnostics-switch" title="Enable diagnostics">
+          <input
+            bind:checked={diagnosticsEnabled}
+            type="checkbox"
+            disabled={diagnosticsBusy}
+            on:change={toggleDiagnostics}
+          />
+          <span>{diagnosticsEnabled ? "On" : "Off"}</span>
+        </label>
+      </div>
+      <button class="btn-integrations diagnostics-save" on:click={exportDiagnostics} disabled={diagnosticsBusy}>
+        {diagnosticsBusy ? "Working…" : "Save diagnostic log"}
+      </button>
+      {#if diagnosticsMessage}
+        <div class:diagnostics-error={diagnosticsMessage.startsWith("Could not") || diagnosticsMessage.startsWith("No diagnostic")}
+             class="diagnostics-message">{diagnosticsMessage}</div>
+      {/if}
     </div>
 
     {#if $authToken}
@@ -326,6 +392,30 @@
     justify-content: space-between;
     gap: 12px;
   }
+  .diagnostics-card {
+    padding: 14px;
+    border: 1px solid #1f2432;
+    border-radius: 10px;
+    background: #0a0c12;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .diagnostics-heading { display: flex; align-items: flex-start; gap: 12px; }
+  .diagnostics-heading > div { flex: 1; min-width: 0; }
+  .diagnostics-switch {
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .diagnostics-switch input { width: auto; }
+  .diagnostics-switch span { color: #a5b4fc; }
+  .diagnostics-save { align-self: flex-start; }
+  .diagnostics-save:disabled { opacity: 0.5; cursor: not-allowed; }
+  .diagnostics-message { color: #86efac; font-size: 11px; line-height: 1.4; word-break: break-word; }
+  .diagnostics-error { color: #fca5a5; }
   .integration-title {
     font-size: 11px;
     font-weight: 700;

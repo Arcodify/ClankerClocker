@@ -95,6 +95,8 @@ export interface AppSettings {
   clock_in_time: string;
   clock_out_time: string;
   auto_clock_out_enabled: boolean;
+  /** Runtime-only; always resets to false when the app restarts. */
+  diagnostics_enabled: boolean;
   pm_enabled: boolean;
   pm_workspace_slug: string;
   pm_base_url: string;

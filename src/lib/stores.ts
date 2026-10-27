@@ -21,6 +21,7 @@ export const settings = writable<AppSettings>({
   clock_in_time: "09:00",
   clock_out_time: "18:00",
   auto_clock_out_enabled: true,
+  diagnostics_enabled: false,
   pm_enabled: false,
   pm_workspace_slug: "",
   pm_base_url: "",

@@ -234,6 +234,22 @@
   }
 
   onMount(() => {
+    const reportWindowError = (event: ErrorEvent) => {
+      invoke("record_frontend_diagnostic", {
+        kind: "uncaught_error",
+        message: event.error?.stack || event.message || "Unknown frontend error",
+      }).catch(() => {});
+    };
+    const reportUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      invoke("record_frontend_diagnostic", {
+        kind: "unhandled_rejection",
+        message: reason?.stack || String(reason),
+      }).catch(() => {});
+    };
+    window.addEventListener("error", reportWindowError);
+    window.addEventListener("unhandledrejection", reportUnhandledRejection);
+
     console.log("App mounted");
     initialize().catch((err) => console.error("Initialize failed:", err));
 
@@ -338,6 +354,8 @@
       clearTimeout(notificationTimeout);
       unlistens.forEach((p) => p.catch(() => {}).then((u) => u && u()));
       window.removeEventListener("keydown", handleShortcutKeydown);
+      window.removeEventListener("error", reportWindowError);
+      window.removeEventListener("unhandledrejection", reportUnhandledRejection);
       if (repeatIntervalId !== null) clearInterval(repeatIntervalId);
     };
   });
@@ -357,6 +375,7 @@
         clock_in_time: saved.clock_in_time || s.clock_in_time,
         clock_out_time: saved.clock_out_time || s.clock_out_time,
         auto_clock_out_enabled: saved.auto_clock_out_enabled !== false,
+        diagnostics_enabled: !!saved.diagnostics_enabled,
         pm_enabled: !!saved.pm_enabled,
         pm_workspace_slug: saved.pm_workspace_slug || "",
         pm_base_url: saved.pm_base_url || "",

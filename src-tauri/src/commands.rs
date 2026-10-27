@@ -63,8 +63,9 @@ pub async fn start_break_internal(
     };
 
     let now = Utc::now();
+    let pb_ready = !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty();
 
-    let break_id = if session_id.starts_with("local-") || pb_url.is_empty() || pb_token.is_empty() {
+    let break_id = if !pb_ready {
         format!("local-break-{}", Uuid::new_v4())
     } else {
         let pb = PocketBase::new(pb_url.clone(), pb_token.clone());
@@ -90,7 +91,7 @@ pub async fn start_break_internal(
         (break_count, total_break_seconds)
     };
 
-    if !session_id.starts_with("local-") && !pb_url.is_empty() && !pb_token.is_empty() {
+    if pb_ready {
         let pb = PocketBase::new(pb_url, pb_token);
         // The server-side auto-clockout cron treats an "active" session as
         // idle-eligible, so a failed status PATCH here can get the user
@@ -118,6 +119,7 @@ pub async fn start_break_internal(
         &format!("your {label} is starting"),
         "the timer is paused — this time won't count toward your work hours.",
     );
+    log::info!("break started: type={break_type} server_synced={pb_ready}");
     update_tray(app, "break");
     Ok(())
 }
@@ -205,6 +207,7 @@ pub async fn end_break_internal(
         &format!("your break {break_name} has ended"),
         "you're back — the timer is running again.",
     );
+    log::info!("break ended: duration_seconds={break_duration} server_available={pb_ready}");
     update_tray(app, "active");
     Ok((break_count, total_break_seconds))
 }
@@ -257,6 +260,11 @@ pub async fn clock_out_internal(
     };
 
     let now = Utc::now();
+    log::info!(
+        "clock out started: status={status:?} server_session={} user_reason_provided={}",
+        !session_id.starts_with("local-"),
+        early_clockout_reason.is_some()
+    );
 
     // Always reset local state immediately — the user must never be
     // stuck in "Clocked In" because of a network failure.
@@ -283,6 +291,8 @@ pub async fn clock_out_internal(
             log::warn!("clock_out: PB sync failed for session {session_id}: {e}");
         }
     }
+
+    log::info!("clock out finished");
 
     Ok(())
 }
@@ -385,12 +395,62 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, Str
         "clock_in_time": cfg.clock_in_time,
         "clock_out_time": cfg.clock_out_time,
         "auto_clock_out_enabled": cfg.auto_clock_out_enabled,
+        "diagnostics_enabled": state.diagnostics.enabled(),
         "token_saved_at": cfg.token_saved_at,
         "pm_enabled": cfg.pm_enabled,
         "pm_workspace_slug": cfg.pm_config.get("workspace_slug").and_then(|v| v.as_str()).unwrap_or(""),
         "pm_base_url": cfg.pm_config.get("base_url").and_then(|v| v.as_str()).unwrap_or(""),
         "default_pb_url": DEFAULT_PB_URL,
     }))
+}
+
+#[tauri::command]
+pub fn set_diagnostics_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state.diagnostics.set_enabled(enabled);
+    Ok(enabled)
+}
+
+#[tauri::command]
+pub fn export_diagnostic_log(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let directory = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().document_dir())
+        .map_err(|e| format!("Could not find Downloads or Documents: {e}"))?;
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let filename = format!(
+        "clankerclocker-diagnostics-{}.jsonl",
+        Utc::now().format("%Y%m%d-%H%M%S")
+    );
+    let destination = directory.join(filename);
+    state.diagnostics.record(
+        "diagnostics_exported",
+        json!({ "destination": destination.file_name().and_then(|v| v.to_str()) }),
+    );
+    state.diagnostics.export_to(&destination)?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn record_frontend_diagnostic(
+    state: State<'_, AppState>,
+    kind: String,
+    message: String,
+) {
+    // record() is a no-op unless diagnostics is enabled for this app run.
+    state.diagnostics.record(
+        "frontend_error",
+        json!({
+            "kind": kind.chars().take(64).collect::<String>(),
+            "message": message.chars().take(4000).collect::<String>(),
+        }),
+    );
 }
 
 #[tauri::command]
@@ -614,6 +674,16 @@ pub async fn clock_in(
 
     // Update tray icon
     update_tray(&app, "active");
+    log::info!(
+        "clock in finished: offline_session={} past_schedule={past_schedule} forced={force}",
+        state
+            .session
+            .lock()
+            .session_id
+            .as_deref()
+            .map(|id| id.starts_with("local-"))
+            .unwrap_or(false)
+    );
 
     Ok(())
 }
