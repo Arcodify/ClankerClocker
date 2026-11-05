@@ -37,6 +37,7 @@ pub struct AppState {
     pub active_window: Arc<Mutex<(String, String)>>,
     pub db: Arc<Mutex<LocalDb>>,
     pub break_id: Arc<Mutex<Option<String>>>,
+    pub break_start_lock: Arc<tokio::sync::Mutex<()>>,
     pub break_configs: Arc<Mutex<Vec<BreakConfig>>>,
     pub auto_break_history: Arc<Mutex<HashSet<String>>>,
     pub scheduled_notification_history: Arc<Mutex<HashSet<String>>>,
@@ -75,6 +76,7 @@ pub fn run() {
             let counters: Arc<Mutex<ActivityCounters>> =
                 Arc::new(Mutex::new(ActivityCounters::default()));
             let break_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let break_start_lock = Arc::new(tokio::sync::Mutex::new(()));
             let break_configs: Arc<Mutex<Vec<BreakConfig>>> =
                 Arc::new(Mutex::new(BreakConfig::defaults()));
             let auto_break_history: Arc<Mutex<HashSet<String>>> =
@@ -178,6 +180,7 @@ pub fn run() {
                 active_window: active_window.clone(),
                 db: db.clone(),
                 break_id: break_id.clone(),
+                break_start_lock: break_start_lock.clone(),
                 break_configs: break_configs.clone(),
                 auto_break_history: auto_break_history.clone(),
                 scheduled_notification_history: scheduled_notification_history.clone(),
@@ -202,6 +205,7 @@ pub fn run() {
                     config: config.clone(),
                     db: db.clone(),
                     break_id: break_id.clone(),
+                    break_start_lock: break_start_lock.clone(),
                     break_configs: break_configs.clone(),
                     auto_break_history: auto_break_history.clone(),
                     notification_history: scheduled_notification_history.clone(),
@@ -347,6 +351,7 @@ struct Background {
     config: Arc<Mutex<AppConfig>>,
     db: Arc<Mutex<LocalDb>>,
     break_id: Arc<Mutex<Option<String>>>,
+    break_start_lock: Arc<tokio::sync::Mutex<()>>,
     break_configs: Arc<Mutex<Vec<BreakConfig>>>,
     auto_break_history: Arc<Mutex<HashSet<String>>>,
     notification_history: Arc<Mutex<HashSet<String>>>,
@@ -903,6 +908,7 @@ impl Background {
                 &self.session,
                 &self.config,
                 &self.break_id,
+                &self.break_start_lock,
                 &config.type_key,
                 Some(&config.name),
             )

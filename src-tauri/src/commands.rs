@@ -46,9 +46,14 @@ pub async fn start_break_internal(
     session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
     config: &std::sync::Arc<parking_lot::Mutex<crate::session::AppConfig>>,
     break_id_state: &std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    break_start_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
     break_type: &str,
     break_name: Option<&str>,
 ) -> Result<(), String> {
+    // Serialize the state check with PocketBase creation. Otherwise two
+    // requests can both observe Active while the first POST is in flight and
+    // leave one of the resulting break records open forever.
+    let _start_guard = break_start_lock.lock().await;
     let (pb_url, pb_token, session_id) = {
         let cfg = config.lock();
         let sess = session.lock();
@@ -801,6 +806,7 @@ pub async fn start_break(
         &state.session,
         &state.config,
         &state.break_id,
+        &state.break_start_lock,
         &break_type,
         break_name.as_deref(),
     )
@@ -1591,13 +1597,25 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
     }
 
     let pb = PocketBase::new(pb_url, pb_token);
-    let user = pb
-        .get_user_record(&user_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let auth = match pb.refresh_auth().await {
+        Ok(auth) => auth,
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("401 Unauthorized")
+                || message.contains("403 Forbidden")
+                || message.contains("404 Not Found")
+            {
+                clear_saved_auth(&state)?;
+                return Err("AUTH_EXPIRED".into());
+            }
+            return Err(message);
+        }
+    };
+    let user = auth.record;
 
     {
         let mut cfg = state.config.lock();
+        cfg.pb_token = auth.token.clone();
         if !user.name.trim().is_empty() {
             cfg.user_name = user.name.trim().to_string();
         }
@@ -1634,6 +1652,7 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
         .map_err(|e| e.to_string())?;
 
     Ok(json!({
+        "token": cfg_save.pb_token,
         "user_name": cfg_save.user_name,
         "user_email": cfg_save.user_email,
         "is_admin": cfg_save.is_admin,
@@ -1646,6 +1665,10 @@ pub async fn refresh_auth_state(state: State<'_, AppState>) -> Result<serde_json
 
 #[tauri::command]
 pub async fn clear_auth(state: State<'_, AppState>) -> Result<(), String> {
+    clear_saved_auth(&state)
+}
+
+fn clear_saved_auth(state: &AppState) -> Result<(), String> {
     {
         let mut cfg = state.config.lock();
         cfg.pb_token = String::new();

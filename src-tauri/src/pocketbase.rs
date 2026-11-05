@@ -122,9 +122,27 @@ impl PocketBase {
         let raw_data = resp.text().await?;
         let auth_data: PbAuthResponse = serde_json::from_str(&raw_data)?;
 
-        println!("{:?}", auth_data);
-
         Ok(auth_data)
+    }
+
+    /// Validates and rotates the current PocketBase auth token.
+    pub async fn refresh_auth(&self) -> Result<PbAuthResponse> {
+        let url = format!(
+            "{}/api/collections/users/auth-refresh",
+            self.base_url.trim_end_matches('/')
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("PB auth refresh error ({status}): {text}"));
+        }
+        Ok(resp.json::<PbAuthResponse>().await?)
     }
 
     async fn post(&self, collection: &str, body: Value) -> Result<PbRecord> {
@@ -178,8 +196,9 @@ impl PocketBase {
             .send()
             .await?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("PB get error: {}", text));
+            return Err(anyhow!("PB get error ({status}): {text}"));
         }
         Ok(resp.json::<T>().await?)
     }
