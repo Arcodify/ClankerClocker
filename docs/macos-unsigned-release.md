@@ -30,6 +30,12 @@ Or pass an explicit app bundle path:
 npm run install:macos:unsigned -- /path/to/ClankerClocker.app
 ```
 
+When replacing an existing unsigned build, the installer offers to reset
+ClankerClocker's bundle-scoped TCC entries. Accept the reset so Accessibility,
+Input Monitoring, and Automation are requested for the new binary instead of
+remaining attached to the previous unsigned binary. For unattended installs,
+set `CLANKER_RESET_TCC_ON_UPDATE=1`.
+
 ## Notes
 
 - This avoids manually running `xattr -cr` every time.

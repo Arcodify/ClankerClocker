@@ -233,6 +233,36 @@
     } catch (_) {}
   }
 
+  async function restoreAuthenticatedState() {
+    try {
+      const state = await invoke<SessionState>("get_session_state");
+      console.log("Restored session:", state.status);
+      session.set(state);
+      if (state.status !== "idle" && state.clock_in) {
+        if (state.status === "on_break" && state.break_start) {
+          const breakStart = new Date(state.break_start).getTime();
+          elapsedSeconds.set(
+            Math.max(0, Math.floor((Date.now() - breakStart) / 1000)),
+          );
+        } else {
+          const start = new Date(state.clock_in).getTime();
+          const elapsed =
+            Math.floor((Date.now() - start) / 1000) -
+            state.total_break_seconds;
+          elapsedSeconds.set(Math.max(0, elapsed));
+        }
+        startTicker();
+      }
+
+      const task = await invoke<TaskRecord | null>("get_active_task").catch(
+        () => null,
+      );
+      activeTask.set(task);
+    } catch (err) {
+      console.warn("Failed to restore authenticated state:", err);
+    }
+  }
+
   onMount(() => {
     const reportWindowError = (event: ErrorEvent) => {
       invoke("record_frontend_diagnostic", {
@@ -251,38 +281,11 @@
     window.addEventListener("unhandledrejection", reportUnhandledRejection);
 
     console.log("App mounted");
-    initialize().catch((err) => console.error("Initialize failed:", err));
-
-    // Restore running session from the Rust side (survives UI restarts)
-    invoke<SessionState>("get_session_state")
-      .then((state) => {
-        console.log("Restored session:", state.status);
-        session.set(state);
-        if (state.status !== "idle" && state.clock_in) {
-          if (state.status === "on_break" && state.break_start) {
-            const breakStart = new Date(state.break_start).getTime();
-            elapsedSeconds.set(
-              Math.max(0, Math.floor((Date.now() - breakStart) / 1000)),
-            );
-          } else {
-            const start = new Date(state.clock_in).getTime();
-            const elapsed =
-              Math.floor((Date.now() - start) / 1000) -
-              state.total_break_seconds;
-            elapsedSeconds.set(Math.max(0, elapsed));
-          }
-          if (state.status === "active" || state.status === "on_break")
-            startTicker();
-          view.set("dashboard");
-        }
+    initialize()
+      .then((authenticated) => {
+        if (authenticated) return restoreAuthenticatedState();
       })
-      .catch((err) => console.warn("Failed to get session state:", err));
-
-    // Restore a running task the same way — otherwise a restart mid-task
-    // silently drops its timer even though the session itself survives.
-    invoke<TaskRecord | null>("get_active_task")
-      .then((task) => activeTask.set(task))
-      .catch(() => {});
+      .catch((err) => console.error("Initialize failed:", err));
 
     // Real-time events from Rust daemon
     const unlistens: Array<Promise<any>> = [
@@ -360,7 +363,7 @@
     };
   });
 
-  async function initialize() {
+  async function initialize(): Promise<boolean> {
     try {
       console.log("Invoking get_settings...");
       const saved = await invoke<any>("get_settings");
@@ -381,31 +384,52 @@
         pm_base_url: saved.pm_base_url || "",
       }));
 
-      if (saved.pb_token && saved.token_saved_at) {
-        const ageMs = Date.now() - new Date(saved.token_saved_at).getTime();
-        if (ageMs > 86_400_000) {
-          console.log("Token expired");
-          await invoke("clear_auth").catch(() => {});
-        } else {
-          authToken.set(saved.pb_token);
-          userId.set(saved.user_id);
-          userName.set(saved.user_name || saved.user_email);
-          isAdmin.set(!!saved.is_admin);
+      if (saved.pb_token && saved.user_id) {
+        authToken.set(saved.pb_token);
+        userId.set(saved.user_id);
+        userName.set(saved.user_name || saved.user_email);
+        isAdmin.set(!!saved.is_admin);
 
+        const authenticated = await refreshAuth();
+        if (authenticated) {
           view.set("dashboard");
-          refreshAuth().catch(() => {});
+          return true;
         }
       }
+      return false;
     } catch (err) {
       console.error("Initialize error:", err);
+      return false;
     } finally {
       setInterval(refreshAuth, 300_000);
     }
   }
 
-  async function refreshAuth() {
+  function showLoginForExpiredAuth() {
+    clearInterval(ticker);
+    authToken.set("");
+    userId.set("");
+    userName.set("");
+    isAdmin.set(false);
+    session.set({
+      status: "idle",
+      session_id: null,
+      clock_in: null,
+      break_start: null,
+      break_name: null,
+      total_break_seconds: 0,
+      break_count: 0,
+    });
+    activeTask.set(null);
+    elapsedSeconds.set(0);
+    view.set("login");
+    errorMessage.set("Your login expired. Please sign in again.");
+  }
+
+  async function refreshAuth(): Promise<boolean> {
     try {
       const refreshed = await invoke<{
+        token: string;
         user_name: string;
         user_email: string;
         is_admin: boolean;
@@ -413,6 +437,7 @@
         clock_out_time: string;
         auto_clock_out_enabled: boolean;
       }>("refresh_auth_state");
+      if (refreshed.token) authToken.set(refreshed.token);
       if (refreshed.user_name) userName.set(refreshed.user_name);
       isAdmin.set(refreshed.is_admin);
       settings.update((s) => ({
@@ -423,7 +448,15 @@
         clock_out_time: refreshed.clock_out_time || s.clock_out_time,
         auto_clock_out_enabled: refreshed.auto_clock_out_enabled,
       }));
-    } catch (_) {}
+      return true;
+    } catch (err) {
+      if (String(err).includes("AUTH_EXPIRED")) {
+        showLoginForExpiredAuth();
+        return false;
+      }
+      // A temporary network outage must not sign out a valid user.
+      return true;
+    }
   }
 
   function startTicker() {
