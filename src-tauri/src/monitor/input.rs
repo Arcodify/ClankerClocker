@@ -133,6 +133,29 @@ fn is_mouse_button_code(code: u16) -> bool {
 fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBool>) {
     use rdev::{listen, Event, EventType};
 
+    #[cfg(target_os = "macos")]
+    {
+        let (accessibility, listen_events) = macos_input_permissions();
+        active_flag.store(accessibility && listen_events, Ordering::Relaxed);
+        if !accessibility || !listen_events {
+            log::warn!(
+                "macOS global input permission missing: accessibility={}, input_monitoring={}. \
+                 Grant both in System Settings -> Privacy & Security, then restart ClankerClocker.",
+                accessibility,
+                listen_events
+            );
+
+            // This is the supported macOS API for requesting ListenEvent
+            // (shown as Input Monitoring in System Settings). It is safe to
+            // call repeatedly: macOS only shows the consent UI when needed.
+            if !listen_events {
+                unsafe {
+                    CGRequestListenEventAccess();
+                }
+            }
+        }
+    }
+
     std::thread::Builder::new()
         .name("input-monitor".into())
         .spawn(move || {
@@ -157,12 +180,12 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                             EventType::KeyPress(_) => {
                                 c.last_activity = Some(std::time::Instant::now());
                                 c.keystrokes += 1;
-                                active_flag_ref.store(true, Ordering::Relaxed);
+                                mark_input_monitor_active(&active_flag_ref);
                             }
                             EventType::ButtonPress(_) => {
                                 c.last_activity = Some(std::time::Instant::now());
                                 c.mouse_clicks += 1;
-                                active_flag_ref.store(true, Ordering::Relaxed);
+                                mark_input_monitor_active(&active_flag_ref);
                             }
                             // Scrolling is real user input too. Precision
                             // touchpads commonly emit wheel events for
@@ -171,7 +194,7 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                 if delta_x != 0 || delta_y != 0 =>
                             {
                                 c.last_activity = Some(std::time::Instant::now());
-                                active_flag_ref.store(true, Ordering::Relaxed);
+                                mark_input_monitor_active(&active_flag_ref);
                             }
                             EventType::MouseMove { x, y } => {
                                 if x.is_finite() && y.is_finite() {
@@ -189,7 +212,7 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
                                     c.last_mouse_y = y;
                                     if moved {
                                         c.last_activity = Some(std::time::Instant::now());
-                                        active_flag_ref.store(true, Ordering::Relaxed);
+                                        mark_input_monitor_active(&active_flag_ref);
                                     }
                                 }
                             }
@@ -211,4 +234,36 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
             }
         })
         .ok();
+}
+
+// Windows has no reliable permission-preflight API for its global hook, so a
+// received event remains the best health signal there.
+#[cfg(target_os = "windows")]
+fn mark_input_monitor_active(active_flag: &AtomicBool) {
+    active_flag.store(true, Ordering::Relaxed);
+}
+
+// An untrusted macOS event tap can still receive events aimed at this app's
+// own window. Never use those local events as proof that global monitoring is
+// working; verify the two TCC grants instead. This is the exact failure mode
+// where counters move only while ClankerClocker is focused.
+#[cfg(target_os = "macos")]
+fn mark_input_monitor_active(active_flag: &AtomicBool) {
+    if !active_flag.load(Ordering::Relaxed) {
+        let (accessibility, listen_events) = macos_input_permissions();
+        active_flag.store(accessibility && listen_events, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_input_permissions() -> (bool, bool) {
+    unsafe { (AXIsProcessTrusted(), CGPreflightListenEventAccess()) }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
 }
