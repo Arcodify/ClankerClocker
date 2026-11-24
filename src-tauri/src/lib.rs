@@ -994,6 +994,8 @@ impl Background {
             Some(pb) => {
                 if pb.push_snapshot(&sid, &snap).await.is_err() {
                     self.db.lock().queue_snapshot(&sid, &snap).ok();
+                } else {
+                    commands::flush_pending_break_end(&pb, &self.session).await;
                 }
             }
             None => {

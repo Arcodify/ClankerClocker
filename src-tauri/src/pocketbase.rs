@@ -630,7 +630,9 @@ impl PocketBase {
             let Some(start) = Self::parse_pb_datetime(start_time) else {
                 continue;
             };
-            if break_id.is_empty() {
+            // Never close a break that started after `end` (a newer break the
+            // user began while an older close was still pending).
+            if break_id.is_empty() || start > *end {
                 continue;
             }
 
@@ -681,17 +683,41 @@ impl PocketBase {
         Ok(())
     }
 
+    /// Lists records. A `perPage=N` in `extra` used to be appended after our
+    /// own `perPage=200`, and PocketBase reads the first value — so
+    /// "perPage=1" lookups paged through every matching record. Now:
+    /// perPage < 200 means "limit" (one page only); otherwise it's the page
+    /// size (capped at PB's max) and all pages are fetched. skipTotal drops
+    /// the COUNT(*) PB otherwise runs on every request.
     async fn get_list(&self, collection: &str, filter: &str, extra: &str) -> Result<Value> {
+        const PB_MAX_PER_PAGE: usize = 500;
+        let mut requested: Option<usize> = None;
+        let extra: String = extra
+            .split('&')
+            .filter(|part| {
+                if let Some(n) = part.strip_prefix("perPage=") {
+                    requested = n.parse().ok();
+                    false
+                } else {
+                    !part.is_empty()
+                }
+            })
+            .map(|part| format!("&{part}"))
+            .collect();
+        let single_page = matches!(requested, Some(n) if n < 200);
+        let per_page = requested.unwrap_or(200).clamp(1, PB_MAX_PER_PAGE);
+
         let mut page = 1usize;
         let mut merged_items: Vec<Value> = Vec::new();
         let mut meta: Option<Value> = None;
 
         loop {
             let url = format!(
-                "{}/api/collections/{}/records?filter={}&perPage=200&page={}{}",
+                "{}/api/collections/{}/records?filter={}&perPage={}&page={}&skipTotal=1{}",
                 self.base_url,
                 collection,
                 urlencoding::encode(filter),
+                per_page,
                 page,
                 extra,
             );
@@ -710,12 +736,13 @@ impl PocketBase {
                 meta = Some(data.clone());
             }
 
+            let got = data["items"].as_array().map_or(0, |items| items.len());
             if let Some(items) = data["items"].as_array() {
                 merged_items.extend(items.iter().cloned());
             }
 
-            let total_pages = data["totalPages"].as_u64().unwrap_or(1) as usize;
-            if page >= total_pages {
+            // skipTotal → totalPages is -1; a short page means we're done.
+            if single_page || got < per_page {
                 break;
             }
             page += 1;
@@ -1096,7 +1123,11 @@ impl PocketBase {
         // record. Derive the full user list from work_sessions instead, which has
         // permissive read rules for authenticated admins.
         let data = self
-            .get_list("work_sessions", "", "&sort=-clock_in&perPage=500")
+            .get_list(
+                "work_sessions",
+                "",
+                "&sort=-clock_in&perPage=500&fields=user_id,user_name,user_email",
+            )
             .await?;
         let items = data["items"].as_array().cloned().unwrap_or_default();
         let mut seen = std::collections::HashSet::new();

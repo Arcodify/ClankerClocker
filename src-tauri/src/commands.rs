@@ -129,6 +129,62 @@ pub async fn start_break_internal(
     Ok(())
 }
 
+/// A break the user ended locally whose end_time never reached PocketBase:
+/// (session_id, end time). Drained by `flush_pending_break_end`.
+static PENDING_BREAK_END: parking_lot::Mutex<Option<(String, chrono::DateTime<Utc>)>> =
+    parking_lot::Mutex::new(None);
+
+/// Ends the break on the server: PATCH by id (retried), falling back to
+/// closing every open break on the session that started before `end`.
+async fn close_break_on_server(
+    pb: &PocketBase,
+    session_id: &str,
+    break_id: Option<&str>,
+    end: &chrono::DateTime<Utc>,
+) -> bool {
+    if let Some(id) = break_id {
+        for attempt in 0..3u64 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(attempt * 2)).await;
+            }
+            match pb.end_break(id, end).await {
+                Ok(()) => return true,
+                Err(e) => log::warn!("end_break: PATCH {id} attempt {} failed: {e}", attempt + 1),
+            }
+        }
+    }
+    pb.close_open_breaks(session_id, end).await.is_ok()
+}
+
+/// Retries a queued break close. Called after each successful snapshot push
+/// (connectivity is back). Skipped while the session is on break again, and
+/// dropped once the session changed.
+pub async fn flush_pending_break_end(
+    pb: &PocketBase,
+    session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
+) {
+    let Some((sid, end)) = PENDING_BREAK_END.lock().clone() else {
+        return;
+    };
+    {
+        let sess = session.lock();
+        if sess.session_id.as_deref() != Some(sid.as_str()) {
+            *PENDING_BREAK_END.lock() = None;
+            return;
+        }
+        if sess.status == SessionStatus::OnBreak {
+            return;
+        }
+    }
+    if pb.close_open_breaks(&sid, &end).await.is_ok() {
+        log::info!("end_break: queued server close for {sid} succeeded");
+        let mut pending = PENDING_BREAK_END.lock();
+        if pending.as_ref().map(|(s, e)| (s.as_str(), *e)) == Some((sid.as_str(), end)) {
+            *pending = None;
+        }
+    }
+}
+
 pub async fn end_break_internal(
     app: &tauri::AppHandle,
     session: &std::sync::Arc<parking_lot::Mutex<SessionState>>,
@@ -184,12 +240,13 @@ pub async fn end_break_internal(
 
     if !session_id.starts_with("local-") && pb_ready {
         let pb = PocketBase::new(pb_url, pb_token);
-        if let Some(id) = break_id.as_deref().filter(|id| !id.starts_with("local-")) {
-            pb.end_break(id, &now).await.ok();
-        } else {
-            // Break id was lost — close whatever open break records exist so
-            // the server-side cron doesn't see a phantom open break.
-            pb.close_open_breaks(&session_id, &now).await.ok();
+        // This PATCH used to be fire-and-forget: one failure left the break
+        // open on the server, so break time kept growing there and the cron
+        // stopped shielding/started judging the session as an overrun break.
+        let id = break_id.as_deref().filter(|id| !id.starts_with("local-"));
+        if !close_break_on_server(&pb, &session_id, id, &now).await {
+            log::warn!("end_break: server close failed for {session_id}, queued for retry");
+            *PENDING_BREAK_END.lock() = Some((session_id.clone(), now));
         }
         // The cron treats an "on_break" record whose status never flipped back
         // as still on break, so retry this PATCH once like start_break does.
