@@ -652,8 +652,8 @@ impl PocketBase {
                 "timestamp": snap.timestamp.to_rfc3339(),
                 "keystrokes": snap.keystrokes,
                 "mouse_clicks": snap.mouse_clicks,
-                "active_app": snap.active_app,
-                "active_window": snap.active_window,
+                "active_app": clip(&snap.active_app, 255),
+                "active_window": clip(&snap.active_window, 500),
                 "idle_seconds": snap.idle_seconds,
                 "in_call": snap.in_call
             }),
@@ -672,9 +672,9 @@ impl PocketBase {
             json!({
                 "session_id": session_id,
                 "timestamp": conn.timestamp.to_rfc3339(),
-                "process_name": conn.process_name,
-                "remote_host": conn.remote_host,
-                "remote_ip": conn.remote_ip,
+                "process_name": clip(&conn.process_name, 255),
+                "remote_host": clip(&conn.remote_host, 255),
+                "remote_ip": clip(&conn.remote_ip, 64),
                 "remote_port": conn.remote_port,
                 "local_port": conn.local_port
             }),
@@ -1576,4 +1576,11 @@ impl PocketBase {
             item["in_call"].as_bool().unwrap_or(false),
         ))
     }
+}
+
+/// Truncates to PocketBase's text-field `max` (counted in characters, not
+/// bytes). An over-long value gets a 400, and a rejected snapshot used to sit
+/// in the offline queue failing forever, so the server saw the user as offline.
+fn clip(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
