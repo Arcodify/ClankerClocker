@@ -4,7 +4,8 @@
 //   - the app has stopped reporting (offline) for 5+ minutes, or
 //   - the latest snapshot shows 5+ minutes of idle time
 //     (both skipped while a break is within its allowed length), or
-//   - the company's scheduled clock-out time has passed (auto clock-out enabled).
+//   - the company's scheduled clock-out time has passed (auto clock-out enabled), or
+//   - an external staff member's break has run past 1 hour.
 // This is the server-side safety net for when the desktop app isn't running
 // to perform its own client-side auto clock-out.
 //
@@ -13,6 +14,7 @@
 cronAdd("auto_clockout_offline", "* * * * *", () => {
     const utils = require(`${__hooks}/session_utils.js`);
     const OFFLINE_THRESHOLD_SECONDS = 5 * 60; // 5 minutes
+    const EXTERNAL_MAX_BREAK_SECONDS = 60 * 60; // 1 hour
 
     const now = new Date();
     // 5-minute grace after the scheduled time: the client fires its
@@ -56,6 +58,26 @@ cronAdd("auto_clockout_offline", "* * * * *", () => {
             // sitting "on break" until their next clock-in. Someone back at
             // the keyboard who just forgot to end the break isn't idle, so
             // they're left alone.
+            // External staff get no break shield past one hour: a break that
+            // long ends the session, closed at the one-hour mark so the
+            // overrun isn't billed as break time.
+            if (
+                openBreak &&
+                utils.isExternalStaff(session.getString("user_id"))
+            ) {
+                const start = utils.parseDateTime(openBreak.getString("start_time"));
+                if (start && (now - start) / 1000 >= EXTERNAL_MAX_BREAK_SECONDS) {
+                    const end = new Date(start.getTime() + EXTERNAL_MAX_BREAK_SECONDS * 1000);
+                    utils.closeSession(
+                        session,
+                        end,
+                        "[auto_clockout] external staff break over 1h",
+                        end
+                    );
+                    continue;
+                }
+            }
+
             let breakShielded = false;
             if (openBreak) {
                 const allowedEnd = utils.breakAllowedEnd(openBreak);

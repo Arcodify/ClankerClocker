@@ -136,7 +136,7 @@ fn other_start(counters: Arc<Mutex<ActivityCounters>>, active_flag: Arc<AtomicBo
     #[cfg(target_os = "macos")]
     {
         let (accessibility, listen_events) = macos_input_permissions();
-        active_flag.store(accessibility && listen_events, Ordering::Relaxed);
+        active_flag.store(accessibility || listen_events, Ordering::Relaxed);
         if !accessibility || !listen_events {
             log::warn!(
                 "macOS global input permission missing: accessibility={}, input_monitoring={}. \
@@ -251,10 +251,13 @@ fn mark_input_monitor_active(active_flag: &AtomicBool) {
 fn mark_input_monitor_active(active_flag: &AtomicBool) {
     if !active_flag.load(Ordering::Relaxed) {
         let (accessibility, listen_events) = macos_input_permissions();
-        active_flag.store(accessibility && listen_events, Ordering::Relaxed);
+        active_flag.store(accessibility || listen_events, Ordering::Relaxed);
     }
 }
 
+// CGPreflightListenEventAccess is cached per process and stays false until a
+// relaunch, while AXIsProcessTrusted is live. A trusted (Accessibility) process
+// can already tap global events, so either grant is enough.
 #[cfg(target_os = "macos")]
 fn macos_input_permissions() -> (bool, bool) {
     unsafe { (AXIsProcessTrusted(), CGPreflightListenEventAccess()) }
